@@ -1,0 +1,5 @@
+Fill ID,Order ID,Timestamp,_tradeDate,Account,B/S,Quantity,Price,Contract,Product,Product Description,commission
+MASK-B2,MASK-OB2,07/29/2026 22:58:43,2026-07-29,MASKED-ACCOUNT,Buy,4,83.43,MCL,MCL,Micro Crude,2.00
+MASK-S2A,MASK-OS2A,07/29/2026 22:55:49,2026-07-29,MASKED-ACCOUNT,Sell,2,83.30,MCL,MCL,Micro Crude,1.00
+MASK-S2B,MASK-OS2B,07/29/2026 22:55:49,2026-07-29,MASKED-ACCOUNT,Sell,2,83.30,MCL,MCL,Micro Crude,1.00
+

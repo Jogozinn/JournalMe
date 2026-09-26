@@ -1,0 +1,22 @@
+(() => {
+  const api = window.journalmeDesktop;
+  const app = document.querySelector('#app'); const panel = document.querySelector('#capturePanel'); const preview = document.querySelector('#preview');
+  const status = document.querySelector('#status'); const save = document.querySelector('#saveButton'); let token = null; let capturedAt = null; let eventType = 'entry';
+  const message = (value, bad = false) => { status.textContent = value; status.style.color = bad ? '#ef9b9b' : '#aebabc'; };
+  const selected = (group) => [...document.querySelectorAll(`[data-group="${group}"] .selected`)].map((item) => item.textContent);
+  const setCollapsed = async (value) => { await api.setCollapsed(value); app.classList.toggle('collapsed', value); panel.hidden = value; if (!value) { await loadRecent(); } };
+  const loadRecent = async () => { try { const items = await api.listRecentCaptures(); document.querySelector('#recent').innerHTML = items.length ? items.map((item) => `<li>${escapeHtml(item.symbol || 'WAIT')} · ${item.event_type} <span class="badge">${label(item.match_status)}</span><br>${escapeHtml((item.note || '').slice(0, 58))}</li>`).join('') : '<li>No recent captures.</li>'; } catch { document.querySelector('#recent').innerHTML = '<li>Recent captures unavailable.</li>'; } };
+  const label = (value) => value === 'matched' ? 'MATCHED' : value === 'suggested' ? 'POSSIBLE MATCH' : 'UNMATCHED';
+  const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+  const setPreview = (capture) => { token = capture.token; capturedAt = capture.capturedAt; preview.src = capture.dataUrl; preview.hidden = false; message('Screenshot captured.'); };
+  const capture = async () => { try { setPreview(await api.requestScreenshot()); } catch (error) { message(error.message || 'Screenshot capture failed.', true); } };
+  document.querySelector('#collapsedButton').addEventListener('click', async () => { await setCollapsed(false); await capture(); });
+  document.querySelector('#collapseButton').addEventListener('click', () => setCollapsed(true));
+  document.querySelectorAll('[data-event]').forEach((button) => button.addEventListener('click', () => { eventType = button.dataset.event; document.querySelectorAll('[data-event]').forEach((item) => item.classList.toggle('selected', item === button)); }));
+  document.querySelectorAll('.chips button').forEach((button) => button.addEventListener('click', () => button.classList.toggle('selected')));
+  document.querySelector('#settingsButton').addEventListener('click', async () => { const settings = document.querySelector('#settings'); settings.hidden = !settings.hidden; if (!settings.hidden) document.querySelector('#launchAtLogin').checked = (await api.getSettings()).launchAtLogin; });
+  document.querySelector('#launchAtLogin').addEventListener('change', (event) => api.setLaunchAtLogin(event.target.checked));
+  save.addEventListener('click', async () => { if (!token) { message('Capture a screenshot before saving.', true); return; } save.disabled = true; message('Saving…'); try { const response = await api.saveCapture(token, { event_type: eventType, captured_at: capturedAt || new Date().toISOString(), symbol: document.querySelector('#symbol').value, side: document.querySelector('#side').value || undefined, note: document.querySelector('#note').value, setup_tags: selected('setup_tags'), execution_tags: selected('execution_tags'), emotion_tags: selected('emotion_tags') }); message(response.message); token = null; await loadRecent(); setTimeout(() => setCollapsed(true), 900); } catch (error) { message(error.message || 'Save failed. Your screenshot remains available to retry.', true); } finally { save.disabled = false; } });
+  api.onShown(() => setCollapsed(false)); api.onCollapsed((value) => { app.classList.toggle('collapsed', value); panel.hidden = value; }); api.onCaptureReady?.(setPreview); api.onCaptureError?.((error) => message(error, true));
+  api.onShown(loadRecent); window.addEventListener('DOMContentLoaded', loadRecent);
+})();

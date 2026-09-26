@@ -1,0 +1,42 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: journalme
+      POSTGRES_USER: journalme
+      POSTGRES_PASSWORD: journalme
+    volumes:
+      - journalme-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U journalme"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://journalme:journalme@db:5432/journalme
+      JOURNALME_STORAGE_PATH: /data/storage
+      JOURNALME_CORS_ORIGINS: http://localhost:3070
+    volumes:
+      - journalme-files:/data/storage
+    ports:
+      - "8000:8066"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8066/api/v1
+    ports:
+      - "3070:3070"
+    depends_on:
+      - backend
+
+volumes:
+  journalme-db:
+  journalme-files:
+

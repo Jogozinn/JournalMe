@@ -1,0 +1,154 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>JournalMe Companion</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="brand">JournalMe</div>
+        <div class="sub">Capture without leaving the chart</div>
+      </div>
+      <button id="captureBtn" class="ghost" type="button">Take screenshot</button>
+    </header>
+
+    <section class="connection-card" aria-live="polite">
+      <div class="connection-copy">
+        <span id="connectionDot" class="connection-dot"></span>
+        <div>
+          <strong id="connectionTitle">Checking JournalMe</strong>
+          <span id="connectionDetail">Loading connection status</span>
+        </div>
+      </div>
+      <div class="connection-actions">
+        <button id="connectBtn" class="ghost compact" type="button">Connect web</button>
+        <button id="disconnectBtn" class="ghost compact" type="button" hidden>Use local</button>
+      </div>
+    </section>
+
+    <section id="captureCard" class="card capture-card">
+      <div class="screenshot-wrap">
+        <img id="preview" alt="Pending chart capture" />
+        <div id="emptyPreview" class="empty-preview">
+          <strong>No capture yet</strong>
+          <span>Press Alt+C anywhere, or use Take screenshot.</span>
+        </div>
+      </div>
+      <div class="meta-row">
+        <span id="platform">No capture</span>
+        <span id="capturedAt"></span>
+      </div>
+    </section>
+
+    <section class="card form-card">
+      <div class="section-row">
+        <div>
+          <div class="section-title">Log the moment</div>
+          <div class="sub">Everything here saves with the screenshot.</div>
+        </div>
+        <button id="openJournalBtn" class="text-btn" type="button">Open JournalMe</button>
+      </div>
+
+      <label class="field account-field">
+        <span class="label">Save to account</span>
+        <select id="account">
+          <option value="">Automatic account</option>
+        </select>
+      </label>
+
+      <div class="segmented" aria-label="Capture type">
+        <button class="seg active" data-event="entry" type="button">Entry</button>
+        <button class="seg" data-event="exit" type="button">Exit</button>
+        <button class="seg" data-event="update" type="button">Update</button>
+        <button class="seg" data-event="wait" type="button">Wait</button>
+      </div>
+
+      <div class="grid2">
+        <label>
+          <span>Symbol</span>
+          <input id="symbol" maxlength="24" placeholder="MNQ" autocomplete="off" />
+        </label>
+        <label>
+          <span>Side</span>
+          <select id="side">
+            <option value="">Not set</option>
+            <option value="long">Long</option>
+            <option value="short">Short</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="field tag-field">
+        <div class="tag-heading">
+          <div class="label">Setup / context</div>
+          <span>Choose any</span>
+        </div>
+        <div id="setupTags" class="chips"></div>
+        <div class="custom-tag-row">
+          <input id="setupCustom" maxlength="60" placeholder="Add your own setup or context" autocomplete="off" />
+          <button id="addSetupCustom" type="button">Add</button>
+        </div>
+      </div>
+
+      <div class="field tag-field">
+        <div class="tag-heading">
+          <div class="label">Execution</div>
+          <span>What actually happened</span>
+        </div>
+        <div id="executionTags" class="chips"></div>
+        <div class="custom-tag-row">
+          <input id="executionCustom" maxlength="60" placeholder="Add your own execution note" autocomplete="off" />
+          <button id="addExecutionCustom" type="button">Add</button>
+        </div>
+      </div>
+
+      <div class="field tag-field">
+        <div class="tag-heading">
+          <div class="label">State</div>
+          <span>Mindset or emotion</span>
+        </div>
+        <div id="emotionTags" class="chips"></div>
+        <div class="custom-tag-row">
+          <input id="emotionCustom" maxlength="60" placeholder="Add your own state" autocomplete="off" />
+          <button id="addEmotionCustom" type="button">Add</button>
+        </div>
+      </div>
+
+      <label class="field">
+        <span class="label">Quick note</span>
+        <textarea id="note" maxlength="1000" rows="4" placeholder="What mattered here?"></textarea>
+      </label>
+
+      <div class="status-row">
+        <div id="status" class="status"></div>
+        <button id="openSavedBtn" class="text-btn" type="button" hidden>Open saved</button>
+      </div>
+
+      <button id="saveBtn" class="primary" type="button">Save capture</button>
+      <button id="clearBtn" class="text-btn clear-btn" type="button">Clear pending capture</button>
+    </section>
+
+    <section class="card recent-card">
+      <div class="section-title-row">
+        <div>
+          <div class="section-title">Recent captures</div>
+          <div class="sub">Saved directly to JournalMe.</div>
+        </div>
+        <button id="refreshBtn" class="text-btn" type="button">Refresh</button>
+      </div>
+      <div id="recent" class="recent-list">
+        <div class="muted">No captures loaded.</div>
+      </div>
+    </section>
+
+    <footer>
+      <a href="options.html" target="_blank">Connection settings</a>
+    </footer>
+  </main>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

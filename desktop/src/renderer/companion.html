@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>JournalMe Capture</title><link rel="stylesheet" href="companion.css"></head>
+<body>
+  <main id="app" class="collapsed">
+    <button id="collapsedButton" class="jm-button" aria-label="Open JournalMe quick capture">JM</button>
+    <section id="capturePanel" hidden>
+      <header><strong>JournalMe</strong><div><button id="settingsButton" class="icon-button" title="Desktop settings">⚙</button><button id="collapseButton" class="icon-button" title="Collapse">−</button></div></header>
+      <p id="status" role="status">Ready to capture.</p>
+      <div class="event-row" role="group" aria-label="Capture event"><button data-event="entry" class="selected">Entry</button><button data-event="exit">Exit</button><button data-event="update">Update</button><button data-event="wait">WAIT</button></div>
+      <div class="grid"><label>Symbol<input id="symbol" maxlength="80" autocomplete="off" placeholder="MNQ"></label><label>Side<select id="side"><option value="">—</option><option value="long">Long</option><option value="short">Short</option></select></label></div>
+      <fieldset><legend>Setup / context</legend><div class="chips" data-group="setup_tags"><button>FVG</button><button>Liquidity Sweep</button><button>RSI Divergence</button><button>Breakout</button></div></fieldset>
+      <fieldset><legend>Execution</legend><div class="chips" data-group="execution_tags"><button>Good</button><button>Entered Early</button><button>Entered Late</button><button>FOMO</button></div></fieldset>
+      <fieldset><legend>Emotion</legend><div class="chips" data-group="emotion_tags"><button>Calm</button><button>Confident</button><button>Hesitant</button><button>Frustrated</button></div></fieldset>
+      <label>Quick note<textarea id="note" maxlength="1000" placeholder="What happened?"></textarea></label>
+      <img id="preview" alt="Current display screenshot preview" hidden>
+      <button id="saveButton" class="save">Save Capture</button>
+      <section id="settings" hidden><label class="checkbox"><input id="launchAtLogin" type="checkbox"> Launch JournalMe at Windows login</label></section>
+      <section><h2>Recent captures</h2><ul id="recent"><li>Loading…</li></ul></section>
+    </section>
+  </main><script src="companion.js"></script>
+</body></html>

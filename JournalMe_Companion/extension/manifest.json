@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "JournalMe Companion",
+  "version": "0.5.2",
+  "description": "Capture a chart with one shortcut or one button and save it to your JournalMe account.",
+  "permissions": [
+    "activeTab",
+    "tabs",
+    "storage",
+    "unlimitedStorage",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://*.supabase.co/*"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "commands": {
+    "capture-journalme": {
+      "suggested_key": {
+        "default": "Alt+C",
+        "mac": "Alt+C"
+      },
+      "description": "Take a JournalMe screenshot"
+    }
+  },
+  "options_page": "options.html",
+  "icons": {
+    "16": "icon16.png",
+    "32": "icon32.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "externally_connectable": {
+    "matches": [
+      "http://localhost:3070/*",
+      "http://127.0.0.1:3070/*"
+    ]
+  },
+  "optional_host_permissions": [
+    "<all_urls>"
+  ]
+}
