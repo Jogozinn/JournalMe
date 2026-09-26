@@ -248,7 +248,9 @@ export default function HomePage() {
       {!hasTrades ? (
         <EmptyState
           title="Your journal is ready for its first session."
-          copy="Import your Tradovate reports together. JournalMe will identify each one, preview the reconciliation, and build your day automatically."
+          copy="Quick Sync your Tradovate Performance and Fills reports. JournalMe will recognize, reconcile, and build your day automatically."
+          href="/settings/connections"
+          action="Sync Tradovate"
         />
       ) : (
         <>
@@ -262,7 +264,7 @@ export default function HomePage() {
               <Link className="button primary" href={`/timeline/${today}`}>{todayRecord ? "Review today" : "Plan today"}</Link>
               <Link className="button" href="/review">Review queue</Link>
               <Link className="button" href="/manual-trade">Add manual trade</Link>
-              <Link className="button quiet" href="/import"><Icon name="import" /> Import data</Link>
+              <Link className="button quiet" href="/settings/connections"><Icon name="import" /> Sync Tradovate</Link>
             </div>
           </section>
           <section className="metric-grid">

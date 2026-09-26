@@ -50,6 +50,23 @@
       </div>
     </section>
 
+    <section id="brokerSyncCard" class="card broker-sync-card" hidden>
+      <div class="section-title-row">
+        <div>
+          <div class="section-title">Tradovate Quick Sync</div>
+          <div class="sub">Choose Performance + Fills. Add Account Balance History to refresh the broker balance too.</div>
+        </div>
+        <span class="sync-pill">REPORT SYNC</span>
+      </div>
+      <div class="broker-sync-grid">
+        <div><strong>Core</strong><span>Performance + Fills</span></div>
+        <div><strong>Recommended</strong><span>Balance History</span></div>
+      </div>
+      <input id="brokerFiles" type="file" accept=".csv,text/csv" multiple hidden />
+      <button id="brokerSyncBtn" class="primary" type="button">Sync reports</button>
+      <div id="brokerSyncStatus" class="status"></div>
+    </section>
+
     <section id="captureCard" class="card capture-card">
       <div class="screenshot-wrap">
         <img id="preview" alt="Pending chart capture" />

@@ -160,6 +160,7 @@ async function loadConnection() {
   const detail = $("connectionDetail");
   const authCard = $("authCard");
   const signOutBtn = $("signOutBtn");
+  const brokerSyncCard = $("brokerSyncCard");
   dot.className = "connection-dot";
   if (result?.ok && result.mode === "hosted") {
     dot.classList.add("connected");
@@ -167,6 +168,7 @@ async function loadConnection() {
     detail.textContent = result.userEmail || "Cloud account connected";
     authCard.hidden = true;
     signOutBtn.hidden = false;
+    brokerSyncCard.hidden = false;
     return result;
   }
   if (result?.mode === "hosted") {
@@ -175,6 +177,7 @@ async function loadConnection() {
     detail.textContent = "Your captures can sync without the website being open";
     authCard.hidden = false;
     signOutBtn.hidden = true;
+    brokerSyncCard.hidden = true;
     return result;
   }
   dot.classList.add("local");
@@ -182,6 +185,7 @@ async function loadConnection() {
   detail.textContent = "Saving to the configured local JournalMe API";
   authCard.hidden = true;
   signOutBtn.hidden = true;
+  brokerSyncCard.hidden = false;
   return result;
 }
 
@@ -198,6 +202,95 @@ async function journalFetch(path, options = {}) {
   for (const [key, value] of Object.entries(context.headers || {})) headers.set(key, value);
   const base = context.settings.apiBase.replace(/\/$/, "");
   return fetch(`${base}${path}`, { ...options, headers });
+}
+
+function apiDetailMessage(payload, fallback) {
+  const detail = payload?.detail;
+  if (typeof detail === "string") return detail;
+  if (detail && typeof detail === "object") {
+    const parts = [];
+    if (typeof detail.message === "string") parts.push(detail.message);
+    if (Array.isArray(detail.errors)) {
+      for (const issue of detail.errors) {
+        if (!issue || typeof issue !== "object") continue;
+        const prefix = issue.filename ? `${issue.filename}: ` : "";
+        parts.push(`${prefix}${issue.reason || "Invalid report data."}`);
+      }
+    }
+    if (parts.length) return parts.join(" ");
+  }
+  return fallback;
+}
+
+function quickSyncMissing(preview) {
+  const reportTypes = new Set((preview?.reports || []).map((report) => report.type));
+  const missing = [];
+  if (!reportTypes.has("performance") && !reportTypes.has("position_history")) missing.push("Performance");
+  if (!reportTypes.has("fills")) missing.push("Fills");
+  return missing;
+}
+
+async function cancelImportQuietly(sessionId) {
+  if (!sessionId) return;
+  try {
+    await journalFetch(`/api/v1/imports/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
+  } catch {
+    // The preview remains visible in Import history if cancellation itself fails.
+  }
+}
+
+async function syncTradovateReports(files) {
+  if (!files?.length) return;
+  const button = $("brokerSyncBtn");
+  const statusBox = $("brokerSyncStatus");
+  button.disabled = true;
+  button.textContent = "Syncing...";
+  statusBox.className = "status";
+  statusBox.textContent = "Reading Tradovate reports...";
+  try {
+    const form = new FormData();
+    for (const file of files) form.append("files", file);
+    const accountId = $("account").value || "";
+    const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : "";
+    const previewResponse = await journalFetch(`/api/v1/imports/preview${query}`, { method: "POST", body: form });
+    const preview = await previewResponse.json().catch(() => ({}));
+    if (!previewResponse.ok) {
+      throw new Error(apiDetailMessage(preview, `Preview failed (${previewResponse.status}).`));
+    }
+
+    const missing = quickSyncMissing(preview);
+    if (missing.length) {
+      await cancelImportQuietly(preview.session_id);
+      throw new Error(`Quick Sync needs ${missing.join(" and ")} report${missing.length === 1 ? "" : "s"}.`);
+    }
+    if (Array.isArray(preview.errors) && preview.errors.length) {
+      await cancelImportQuietly(preview.session_id);
+      const first = preview.errors[0];
+      throw new Error(`${first?.filename || "A report"}: ${first?.reason || "validation failed"}`);
+    }
+
+    statusBox.textContent = "Reports recognized. Updating JournalMe...";
+    const commitResponse = await journalFetch(`/api/v1/imports/${encodeURIComponent(preview.session_id)}/commit`, { method: "POST" });
+    const commit = await commitResponse.json().catch(() => ({}));
+    if (!commitResponse.ok) {
+      throw new Error(apiDetailMessage(commit, `Sync failed (${commitResponse.status}).`));
+    }
+    const created = commit.created || {};
+    const balanceNote = (preview.reports || []).some((report) => report.type === "account_balance_history")
+      ? ` · ${Number(created.daily_balances || 0)} balance snapshot${Number(created.daily_balances || 0) === 1 ? "" : "s"}`
+      : " · balance unchanged";
+    statusBox.className = "status ok";
+    statusBox.textContent = `${Number(created.trades || 0)} new trade${Number(created.trades || 0) === 1 ? "" : "s"} · ${Number(created.fills || 0)} fills${balanceNote}`;
+    await loadAccounts();
+    await reconcileAndLoadRecent();
+  } catch (error) {
+    statusBox.className = "status error";
+    statusBox.textContent = error?.message || String(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Sync reports";
+    $("brokerFiles").value = "";
+  }
 }
 
 async function ensureCapturePermission() {
@@ -505,6 +598,8 @@ for (const [buttonId, inputId, group] of customBindings) {
 }
 
 $("account").addEventListener("change", () => chrome.storage.local.set({ companionAccountId: $("account").value || null }));
+$("brokerSyncBtn").addEventListener("click", () => $("brokerFiles").click());
+$("brokerFiles").addEventListener("change", (event) => void syncTradovateReports(event.target.files));
 $("captureBtn").addEventListener("click", captureNow);
 $("saveBtn").addEventListener("click", saveCapture);
 $("clearBtn").addEventListener("click", clearPending);

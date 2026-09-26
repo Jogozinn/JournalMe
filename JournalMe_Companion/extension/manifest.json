@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JournalMe Companion",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Capture a chart with one shortcut or one button and save it to your JournalMe account.",
   "permissions": [
     "activeTab",

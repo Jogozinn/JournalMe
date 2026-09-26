@@ -205,7 +205,7 @@ function ShellContent({ children }: { children: React.ReactNode }) {
             </Link>
           ))}
         </nav>
-        <Link href="/import" className="button sidebar-import" onMouseEnter={() => router.prefetch("/import")} onFocus={() => router.prefetch("/import")} title="Import data">
+        <Link href="/import" className="sidebar-import" onMouseEnter={() => router.prefetch("/import")} onFocus={() => router.prefetch("/import")} title="Import data">
           <Icon name="import" />
           <span>Import data</span>
         </Link>
@@ -265,7 +265,7 @@ function ShellContent({ children }: { children: React.ReactNode }) {
             <span>{item.label}</span>
           </Link>
         ))}
-        <Link href="/import" className="import-action" aria-label="Import trading data">
+        <Link href="/settings/connections" className="import-action" aria-label="Sync broker data" title="Sync broker data">
           <Icon name="import" />
         </Link>
         <Link href="/calendar" className={routeMatches(activePath, "/calendar") ? "active" : ""}>

@@ -14,6 +14,7 @@ export default function MorePage() {
         <Link className="card more-card" href="/playbooks"><Icon name="playbook" /><div><h2>Playbooks</h2><p>Edit trading plans and adherence checklists.</p></div><Icon name="arrow" /></Link>
         <Link className="card more-card" href="/review"><Icon name="review" /><div><h2>Reviews</h2><p>Trade queue plus weekly and monthly reviews.</p></div><Icon name="arrow" /></Link>
         <Link className="card more-card" href="/accounts"><Icon name="accounts" /><div><h2>Accounts</h2><p>Manage accounts, notes, and prop rules.</p></div><Icon name="arrow" /></Link>
+        <Link className="card more-card" href="/settings/connections"><Icon name="settings" /><div><h2>Broker connections</h2><p>Quick Sync Tradovate reports and manage future broker connectors.</p></div><Icon name="arrow" /></Link>
         <Link className="card more-card" href="/imports"><Icon name="import" /><div><h2>Imports & quality</h2><p>Review source sessions and reconciliation evidence.</p></div><Icon name="arrow" /></Link>
         <Link className="card more-card" href="/settings"><Icon name="settings" /><div><h2>Settings</h2><p>Preferences, goals, exports, and backups.</p></div><Icon name="arrow" /></Link>
       </section>

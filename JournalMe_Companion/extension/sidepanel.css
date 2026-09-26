@@ -437,3 +437,46 @@ footer a { color: var(--muted); }
 #signOutBtn {
   white-space: nowrap;
 }
+
+/* JournalMe Companion v0.7 Tradovate Quick Sync */
+.broker-sync-card {
+  display: grid;
+  gap: 11px;
+  border-color: rgba(116,215,163,.16);
+  background:
+    radial-gradient(circle at 90% 0, rgba(116,215,163,.055), transparent 40%),
+    var(--surface);
+}
+
+.broker-sync-card[hidden] { display: none; }
+
+.sync-pill {
+  flex: 0 0 auto;
+  border: 1px solid rgba(116,215,163,.2);
+  border-radius: 999px;
+  background: rgba(116,215,163,.05);
+  color: #9ce1b7;
+  padding: 4px 6px;
+  font-size: 7px;
+  font-weight: 760;
+  letter-spacing: .06em;
+}
+
+.broker-sync-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: #0d100e;
+}
+
+.broker-sync-grid > div {
+  display: grid;
+  gap: 3px;
+  padding: 9px;
+}
+
+.broker-sync-grid > div + div { border-left: 1px solid var(--border); }
+.broker-sync-grid strong { color: var(--muted); font-size: 8px; }
+.broker-sync-grid span { color: #d8e0db; font-size: 9px; }
