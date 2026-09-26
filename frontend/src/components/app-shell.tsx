@@ -9,7 +9,6 @@ import { AuthProvider, useAuth } from "@/components/auth-provider";
 import { BrandMark } from "@/components/brand-mark";
 import { CommandPalette } from "@/components/command-palette";
 import { Icon, type IconName } from "@/components/icons";
-import { LoginScreen } from "@/components/login-screen";
 import { money } from "@/lib/api";
 
 const nav: { href: string; label: string; icon: IconName }[] = [
@@ -28,6 +27,41 @@ const utilityNav: { href: string; label: string; icon: IconName }[] = [
   { href: "/settings", label: "Settings", icon: "settings" },
 ];
 
+const PUBLIC_AUTH_PATHS = new Set([
+  "/login",
+  "/register",
+  "/forgot-password",
+  "/reset-password",
+]);
+
+const AUTH_ENTRY_PATHS = new Set(["/login", "/register", "/forgot-password"]);
+const PROTECTED_PREFIXES = [
+  "/days",
+  "/trades",
+  "/captures",
+  "/calendar",
+  "/analytics",
+  "/playbooks",
+  "/review",
+  "/reviews",
+  "/accounts",
+  "/settings",
+  "/import",
+  "/imports",
+  "/manual-trade",
+  "/timeline",
+  "/goals",
+  "/more",
+  "/companion",
+];
+
+function isProtectedPath(pathname: string): boolean {
+  if (pathname === "/") return true;
+  return PROTECTED_PREFIXES.some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+}
+
 function AccountSelect() {
   const { accounts, account, setAccountId } = useAccount();
   if (!accounts.length) return <span className="muted small">No account yet</span>;
@@ -37,6 +71,7 @@ function AccountSelect() {
       value={account?.id ?? ""}
       onChange={(event) => setAccountId(event.target.value)}
       aria-label="Trading account"
+      title={account?.name ?? "Trading account"}
     >
       {accounts.map((item) => (
         <option key={item.id} value={item.id}>
@@ -55,9 +90,23 @@ function ShellContent({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { hosted, session, signOut } = useAuth();
+  const { account } = useAccount();
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [sidebarCompact, setSidebarCompact] = useState(false);
 
+  useEffect(() => {
+    const saved = window.localStorage.getItem("journalme-sidebar-compact");
+    setSidebarCompact(saved === "1");
+  }, []);
+
+  function toggleSidebar() {
+    setSidebarCompact((current) => {
+      const next = !current;
+      window.localStorage.setItem("journalme-sidebar-compact", next ? "1" : "0");
+      return next;
+    });
+  }
 
   useEffect(() => {
     setMobileSidebarOpen(false);
@@ -72,8 +121,6 @@ function ShellContent({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [mobileSidebarOpen]);
 
-  // Give every internal link immediate visual feedback, even if Next dev mode
-  // is compiling a route for the first time.
   useEffect(() => {
     const handleClick = (event: MouseEvent) => {
       if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
@@ -106,12 +153,23 @@ function ShellContent({ children }: { children: React.ReactNode }) {
   );
 
   return (
-    <div className={`app-shell ${pendingPath ? "route-pending" : ""} ${mobileSidebarOpen ? "sidebar-mobile-open" : ""}`}>
+    <div
+      className={`app-shell ${sidebarCompact ? "sidebar-compact" : ""} ${pendingPath ? "route-pending" : ""} ${mobileSidebarOpen ? "sidebar-mobile-open" : ""}`}
+    >
       <div className="route-progress" aria-hidden="true" />
       <button className="sidebar-scrim" type="button" aria-label="Close navigation" onClick={() => setMobileSidebarOpen(false)} />
       <aside className="sidebar" aria-label="JournalMe navigation">
         <div className="sidebar-brand-row">
           <BrandMark />
+          <button
+            className="sidebar-toggle"
+            type="button"
+            aria-label={sidebarCompact ? "Expand navigation" : "Collapse navigation"}
+            title={sidebarCompact ? "Expand navigation" : "Collapse navigation"}
+            onClick={toggleSidebar}
+          >
+            <Icon name="panel" />
+          </button>
         </div>
         <div className="sidebar-section-label">Journal</div>
         <nav aria-label="Primary navigation">
@@ -147,7 +205,7 @@ function ShellContent({ children }: { children: React.ReactNode }) {
             </Link>
           ))}
         </nav>
-        <Link href="/import" className="button sidebar-import" onMouseEnter={() => router.prefetch("/import")} onFocus={() => router.prefetch("/import")}>
+        <Link href="/import" className="button sidebar-import" onMouseEnter={() => router.prefetch("/import")} onFocus={() => router.prefetch("/import")} title="Import data">
           <Icon name="import" />
           <span>Import data</span>
         </Link>
@@ -159,6 +217,14 @@ function ShellContent({ children }: { children: React.ReactNode }) {
           <span><Icon name="search" /> Quick jump</span>
           <kbd>Ctrl K</kbd>
         </button>
+        <Link
+          href="/accounts"
+          className="sidebar-account-compact"
+          title={account?.name ?? "Accounts"}
+          aria-label={account?.name ? `Current account: ${account.name}` : "Accounts"}
+        >
+          <Icon name="accounts" />
+        </Link>
         <div className="sidebar-foot">
           <span className="sidebar-foot-label">Selected account</span>
           <AccountSelect />
@@ -219,22 +285,30 @@ function AuthenticatedShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const { hosted, loading, session } = useAuth();
+  const isPublicAuthPath = PUBLIC_AUTH_PATHS.has(pathname);
 
   useEffect(() => {
     if (!hosted) {
-      if (pathname === "/login") router.replace("/");
+      if (AUTH_ENTRY_PATHS.has(pathname)) router.replace("/");
       return;
     }
     if (loading) return;
-    if (!session && pathname !== "/login") router.replace("/login");
-    if (session && pathname === "/login") router.replace("/");
-  }, [hosted, loading, pathname, router, session]);
+    if (!session && isProtectedPath(pathname)) router.replace("/login");
+    if (session && AUTH_ENTRY_PATHS.has(pathname)) router.replace("/");
+  }, [hosted, isPublicAuthPath, loading, pathname, router, session]);
 
-  if (hosted && loading) {
+  if (hosted && loading && isProtectedPath(pathname)) {
     return <main className="login-page"><p className="muted">Restoring your JournalMe session...</p></main>;
   }
-  if (hosted && !session) return <LoginScreen />;
-  if (pathname === "/login") return null;
+
+  if (isPublicAuthPath) return <>{children}</>;
+
+  if (hosted && !session && isProtectedPath(pathname)) {
+    return <main className="login-page"><p className="muted">Opening sign in...</p></main>;
+  }
+
+  if (!isProtectedPath(pathname)) return <>{children}</>;
+
   return (
     <AccountProvider>
       <ShellContent>{children}</ShellContent>

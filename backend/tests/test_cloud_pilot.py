@@ -8,7 +8,7 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.auth import SupabaseIdentityProvider
@@ -48,20 +48,51 @@ def test_supabase_storage_provider_uses_private_opaque_keys() -> None:
     assert all("server-only" not in str(call.url) for call in calls)
 
 
-def test_supabase_identity_requires_explicit_mapping() -> None:
+def test_supabase_identity_reuses_existing_mapping() -> None:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     with Session(engine) as db:
         user = User(email="pilot@example.com", display_name="Pilot")
         db.add(user)
         db.commit()
-        provider = SupabaseIdentityProvider(lambda _: {"sub": "auth-user"})
-        with pytest.raises(HTTPException) as missing:
-            provider.current_user(db, "valid-token")
-        assert missing.value.status_code == 403
         db.add(AuthIdentity(user_id=user.id, provider="supabase", subject="auth-user"))
         db.commit()
+        provider = SupabaseIdentityProvider(lambda _: {"sub": "auth-user", "email": "pilot@example.com"})
         assert provider.current_user(db, "valid-token").id == user.id
+
+
+def test_supabase_identity_links_existing_user_by_verified_token_email() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(email="pilot@example.com", display_name="Pilot")
+        db.add(user)
+        db.commit()
+        provider = SupabaseIdentityProvider(lambda _: {"sub": "new-auth-subject", "email": "PILOT@example.com"})
+        resolved = provider.current_user(db, "valid-token")
+        assert resolved.id == user.id
+        identity = db.scalar(select(AuthIdentity).where(AuthIdentity.subject == "new-auth-subject"))
+        assert identity is not None
+        assert identity.user_id == user.id
+
+
+def test_supabase_identity_provisions_first_time_user() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        provider = SupabaseIdentityProvider(
+            lambda _: {
+                "sub": "brand-new-auth-user",
+                "email": "newtrader@example.com",
+                "user_metadata": {"display_name": "New Trader"},
+            }
+        )
+        resolved = provider.current_user(db, "valid-token")
+        assert resolved.email == "newtrader@example.com"
+        assert resolved.display_name == "New Trader"
+        identity = db.scalar(select(AuthIdentity).where(AuthIdentity.subject == "brand-new-auth-user"))
+        assert identity is not None
+        assert identity.user_id == resolved.id
 
 
 def test_supabase_identity_rejects_invalid_token() -> None:

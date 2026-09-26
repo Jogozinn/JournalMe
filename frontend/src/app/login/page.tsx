@@ -1,3 +1,5 @@
+import { LoginScreen } from "@/components/login-screen";
+
 export default function LoginPage() {
-  return <p className="muted">Preparing your JournalMe session…</p>;
+  return <LoginScreen />;
 }

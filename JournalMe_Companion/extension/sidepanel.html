@@ -25,8 +25,28 @@
         </div>
       </div>
       <div class="connection-actions">
-        <button id="connectBtn" class="ghost compact" type="button">Connect web</button>
-        <button id="disconnectBtn" class="ghost compact" type="button" hidden>Use local</button>
+        <button id="signOutBtn" class="ghost compact" type="button" hidden>Sign out</button>
+      </div>
+    </section>
+
+    <section id="authCard" class="card auth-card" hidden>
+      <div>
+        <div class="section-title">Sign in to JournalMe</div>
+        <div class="sub">The Companion syncs directly to your cloud journal. The website does not need to be open.</div>
+      </div>
+      <label>
+        <span>Email</span>
+        <input id="authEmail" type="email" autocomplete="email" placeholder="you@example.com" />
+      </label>
+      <label>
+        <span>Password</span>
+        <input id="authPassword" type="password" autocomplete="current-password" />
+      </label>
+      <div id="authError" class="status error"></div>
+      <button id="signInBtn" class="primary" type="button">Sign in</button>
+      <div class="auth-links">
+        <button id="registerBtn" class="text-btn" type="button">Create account</button>
+        <button id="forgotBtn" class="text-btn" type="button">Forgot password?</button>
       </div>
     </section>
 
@@ -58,6 +78,7 @@
         <select id="account">
           <option value="">Automatic account</option>
         </select>
+        <span id="accountHint" class="account-hint"></span>
       </label>
 
       <div class="segmented" aria-label="Capture type">

@@ -261,6 +261,17 @@ def health() -> dict[str, str]:
     return {"status": "ok", "product": "JournalMe"}
 
 
+@router.get("/public-config")
+def public_config() -> dict[str, str | None]:
+    """Browser-safe configuration for JournalMe web/Companion clients."""
+    settings = get_settings()
+    return {
+        "auth_mode": "hosted" if settings.data_provider == "supabase" else "local",
+        "supabase_url": settings.supabase_url if settings.data_provider == "supabase" else None,
+        "supabase_anon_key": settings.supabase_anon_key if settings.data_provider == "supabase" else None,
+    }
+
+
 @router.get("/accounts")
 def list_accounts(
     db: Db, user: CurrentUser, include_archived: bool = False

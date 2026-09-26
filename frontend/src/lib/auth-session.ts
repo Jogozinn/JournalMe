@@ -58,6 +58,39 @@ export async function signIn(email: string, password: string): Promise<Session> 
   return rememberSession(data.session) as Session;
 }
 
+export async function signUp(
+  email: string,
+  password: string,
+): Promise<{ session: Session | null; needsEmailConfirmation: boolean }> {
+  const { data, error } = await getSupabaseBrowserClient().auth.signUp({
+    email,
+    password,
+  });
+  if (error) throw error;
+  rememberSession(data.session);
+  return {
+    session: data.session,
+    needsEmailConfirmation: Boolean(data.user && !data.session),
+  };
+}
+
+export async function requestPasswordReset(email: string): Promise<void> {
+  const redirectTo =
+    typeof window !== "undefined"
+      ? `${window.location.origin}/reset-password`
+      : undefined;
+  const { error } = await getSupabaseBrowserClient().auth.resetPasswordForEmail(
+    email,
+    redirectTo ? { redirectTo } : undefined,
+  );
+  if (error) throw error;
+}
+
+export async function updatePassword(password: string): Promise<void> {
+  const { error } = await getSupabaseBrowserClient().auth.updateUser({ password });
+  if (error) throw error;
+}
+
 export async function signOut(): Promise<void> {
   if (!hostedAuthEnabled) return;
   const { error } = await getSupabaseBrowserClient().auth.signOut({ scope: "local" });

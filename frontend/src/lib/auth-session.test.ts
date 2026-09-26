@@ -21,10 +21,19 @@ describe("hosted Supabase session boundary", () => {
       data: { session },
       error: null,
     });
+    const signUp = vi.fn().mockResolvedValue({
+      data: { session: null, user: { id: "new-user" } },
+      error: null,
+    });
+    const resetPasswordForEmail = vi.fn().mockResolvedValue({ error: null });
+    const updateUser = vi.fn().mockResolvedValue({ data: { user: {} }, error: null });
     const signOut = vi.fn().mockResolvedValue({ error: null });
     const createClient = vi.fn(() => ({
       auth: {
         signInWithPassword,
+        signUp,
+        resetPasswordForEmail,
+        updateUser,
         getSession,
         signOut,
         onAuthStateChange: vi.fn(() => ({
@@ -44,6 +53,21 @@ describe("hosted Supabase session boundary", () => {
       email: "trader@example.com",
       password: "password",
     });
+    expect(await auth.signUp("new@example.com", "password123")).toEqual({
+      session: null,
+      needsEmailConfirmation: true,
+    });
+    await auth.requestPasswordReset("trader@example.com");
+    await auth.updatePassword("new-password");
+    expect(signUp).toHaveBeenCalledWith({
+      email: "new@example.com",
+      password: "password123",
+    });
+    expect(resetPasswordForEmail).toHaveBeenCalledWith(
+      "trader@example.com",
+      expect.objectContaining({ redirectTo: expect.stringContaining("/reset-password") }),
+    );
+    expect(updateUser).toHaveBeenCalledWith({ password: "new-password" });
     expect(createClient).toHaveBeenCalledWith(
       "https://journalme.supabase.co",
       "publishable-test-key",

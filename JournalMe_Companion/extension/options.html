@@ -11,7 +11,7 @@
     main { max-width:720px; margin:40px auto; padding:20px; }
     .card { display:grid; gap:16px; background:#101411; border:1px solid #29322b; border-radius:14px; padding:18px; }
     label { display:grid; gap:8px; color:#aab2ad; }
-    input[type="text"] { width:100%; padding:10px; background:#0d100e; border:1px solid #29322b; border-radius:9px; color:#f2f4f5; }
+    input[type="text"], select { width:100%; padding:10px; background:#0d100e; border:1px solid #29322b; border-radius:9px; color:#f2f4f5; }
     .check { grid-template-columns:auto 1fr; align-items:center; }
     button { padding:10px 14px; border:0; border-radius:9px; background:#ccefd8; color:#102418; font-weight:800; cursor:pointer; }
     #status { color:#9ce1b7; min-height:20px; }
@@ -24,21 +24,28 @@
     <h1>JournalMe Companion</h1>
     <div class="card">
       <label>
+        Connection mode
+        <select id="connectionMode">
+          <option value="hosted">JournalMe cloud</option>
+          <option value="local">Local development</option>
+        </select>
+      </label>
+      <label>
         JournalMe API root
-        <input id="apiBase" type="text" value="http://127.0.0.1:8066" />
+        <input id="apiBase" type="text" />
       </label>
       <label>
         JournalMe web app
-        <input id="appBase" type="text" value="http://localhost:3070" />
+        <input id="appBase" type="text" />
       </label>
       <label class="check">
         <input id="autoRouteAfterSave" type="checkbox" checked />
-        <span>Route the JournalMe web tab to the saved capture after each save</span>
+        <span>Keep the saved capture ready to open in JournalMe after each save</span>
       </label>
       <button id="save" type="button">Save settings</button>
       <div id="status"></div>
     </div>
-    <p>The normal hosted setup is done from the Companion side panel with <strong>Connect web</strong>. These fields remain available for local development and troubleshooting.</p>
+    <p>Normal users should leave <strong>JournalMe cloud</strong> selected. Local development remains available for testing your local API and web app.</p>
     <p>Capture shortcut: <code>Alt+C</code>.</p>
   </main>
   <script src="options.js"></script>

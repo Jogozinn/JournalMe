@@ -158,31 +158,33 @@ async function loadConnection() {
   const dot = $("connectionDot");
   const title = $("connectionTitle");
   const detail = $("connectionDetail");
-  const connectBtn = $("connectBtn");
-  const disconnectBtn = $("disconnectBtn");
+  const authCard = $("authCard");
+  const signOutBtn = $("signOutBtn");
   dot.className = "connection-dot";
   if (result?.ok && result.mode === "hosted") {
     dot.classList.add("connected");
-    title.textContent = "Connected to JournalMe web";
+    title.textContent = "Signed in to JournalMe";
     detail.textContent = result.userEmail || "Cloud account connected";
-    connectBtn.hidden = true;
-    disconnectBtn.hidden = false;
-  } else if (result?.mode === "hosted") {
-    dot.classList.add("warning");
-    title.textContent = "Web connection needs attention";
-    detail.textContent = result.error || "Reconnect JournalMe Companion";
-    connectBtn.hidden = false;
-    connectBtn.textContent = "Reconnect";
-    disconnectBtn.hidden = false;
-  } else {
-    dot.classList.add("local");
-    title.textContent = "Local capture mode";
-    detail.textContent = "Saving to the local JournalMe API";
-    connectBtn.hidden = false;
-    connectBtn.textContent = "Connect web";
-    disconnectBtn.hidden = true;
+    authCard.hidden = true;
+    signOutBtn.hidden = false;
+    return result;
   }
+  if (result?.mode === "hosted") {
+    dot.classList.add("warning");
+    title.textContent = "Sign in to sync";
+    detail.textContent = "Your captures can sync without the website being open";
+    authCard.hidden = false;
+    signOutBtn.hidden = true;
+    return result;
+  }
+  dot.classList.add("local");
+  title.textContent = "Local development mode";
+  detail.textContent = "Saving to the configured local JournalMe API";
+  authCard.hidden = true;
+  signOutBtn.hidden = true;
+  return result;
 }
+
 
 async function dataUrlToBlob(dataUrl) {
   const response = await fetch(dataUrl);
@@ -320,12 +322,21 @@ async function saveCapture() {
 
 async function loadAccounts() {
   const select = $("account");
+  const hint = $("accountHint");
   const stored = await chrome.storage.local.get("companionAccountId");
   const wanted = stored.companionAccountId || "";
   try {
+    const context = connection || await authContext();
+    if (!context?.ok) {
+      select.innerHTML = '<option value="">Sign in first</option>';
+      select.disabled = true;
+      hint.textContent = "Sign in above to load your JournalMe accounts.";
+      return;
+    }
     const response = await journalFetch("/api/v1/accounts");
     if (!response.ok) throw new Error(`API ${response.status}`);
     const accounts = await response.json();
+    select.disabled = false;
     select.innerHTML = '<option value="">Automatic account</option>';
     for (const account of accounts || []) {
       const option = document.createElement("option");
@@ -335,11 +346,20 @@ async function loadAccounts() {
     }
     if (wanted && [...select.options].some((option) => option.value === wanted)) select.value = wanted;
     else if (accounts?.length === 1) select.value = accounts[0].id;
+    if (!accounts?.length) {
+      select.innerHTML = '<option value="">No trading accounts yet</option>';
+      hint.textContent = "Captures still sync to your journal. Create an account in JournalMe when you are ready.";
+    } else {
+      hint.textContent = `${accounts.length} JournalMe account${accounts.length === 1 ? "" : "s"} available.`;
+    }
   } catch (error) {
     console.warn("JournalMe account load failed", error);
-    select.innerHTML = '<option value="">Automatic account</option>';
+    select.innerHTML = '<option value="">Account list unavailable</option>';
+    select.disabled = true;
+    hint.textContent = error?.message || "Could not load accounts.";
   }
 }
+
 
 async function removeRecentCapture(item) {
   if (!confirm(`Remove ${item.symbol || "this"} capture? This removes only the Companion capture and screenshot, not the trade or journal.`)) return;
@@ -420,19 +440,46 @@ async function openJournalMe() {
   await chrome.runtime.sendMessage({ type: "ROUTE_APP", path: "/captures", activate: true });
 }
 
-async function connectWeb() {
-  setStatus("Opening JournalMe to connect...", "ok");
-  const result = await chrome.runtime.sendMessage({ type: "BEGIN_CONNECT" });
-  if (!result?.ok) setStatus(result?.error || "Could not open JournalMe.", "error");
+async function signInHosted() {
+  const email = $("authEmail").value.trim();
+  const password = $("authPassword").value;
+  const errorBox = $("authError");
+  errorBox.textContent = "";
+  if (!email || !password) {
+    errorBox.textContent = "Enter your email and password.";
+    return;
+  }
+  $("signInBtn").disabled = true;
+  $("signInBtn").textContent = "Signing in...";
+  try {
+    const result = await chrome.runtime.sendMessage({ type: "SIGN_IN_HOSTED", email, password });
+    if (!result?.ok) throw new Error(result?.error || "JournalMe sign in failed.");
+    $("authPassword").value = "";
+    setStatus("Signed in. Companion sync is ready.", "ok");
+    await loadConnection();
+    await loadAccounts();
+    await reconcileAndLoadRecent();
+  } catch (error) {
+    errorBox.textContent = error?.message || String(error);
+  } finally {
+    $("signInBtn").disabled = false;
+    $("signInBtn").textContent = "Sign in";
+  }
 }
 
-async function disconnectHosted() {
-  await chrome.runtime.sendMessage({ type: "DISCONNECT_HOSTED" });
-  setStatus("Using local JournalMe.", "ok");
+async function signOutHosted() {
+  await chrome.runtime.sendMessage({ type: "SIGN_OUT_HOSTED" });
+  connection = null;
+  setStatus("Signed out of JournalMe Companion.");
   await loadConnection();
   await loadAccounts();
-  await reconcileAndLoadRecent();
+  $("recent").innerHTML = '<div class="muted">Sign in to load your captures.</div>';
 }
+
+async function openAuthRoute(path) {
+  await chrome.runtime.sendMessage({ type: "ROUTE_APP", path, activate: true });
+}
+
 
 document.querySelectorAll(".seg").forEach(button => {
   button.addEventListener("click", () => {
@@ -463,21 +510,31 @@ $("saveBtn").addEventListener("click", saveCapture);
 $("clearBtn").addEventListener("click", clearPending);
 $("refreshBtn").addEventListener("click", reconcileAndLoadRecent);
 $("openJournalBtn").addEventListener("click", openJournalMe);
-$("connectBtn").addEventListener("click", connectWeb);
-$("disconnectBtn").addEventListener("click", disconnectHosted);
+$("signInBtn").addEventListener("click", signInHosted);
+$("authPassword").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") void signInHosted();
+});
+$("signOutBtn").addEventListener("click", signOutHosted);
+$("registerBtn").addEventListener("click", () => openAuthRoute("/register"));
+$("forgotBtn").addEventListener("click", () => openAuthRoute("/forgot-password"));
 $("openSavedBtn").addEventListener("click", () => lastSavedRoute && chrome.runtime.sendMessage({ type: "ROUTE_APP", path: lastSavedRoute, activate: true }));
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (changes.companionAuth || changes.settings) {
-    void loadConnection().then(loadAccounts).then(reconcileAndLoadRecent);
+    void loadConnection().then(async (result) => {
+      await loadAccounts();
+      if (result?.ok) await reconcileAndLoadRecent();
+      else $("recent").innerHTML = '<div class="muted">Sign in to load your captures.</div>';
+    });
   }
 });
 
 (async () => {
   await loadCustomTags();
   await loadPending();
-  await loadConnection();
+  const result = await loadConnection();
   await loadAccounts();
-  await reconcileAndLoadRecent();
+  if (result?.ok) await reconcileAndLoadRecent();
+  else $("recent").innerHTML = '<div class="muted">Sign in to load your captures.</div>';
 })();

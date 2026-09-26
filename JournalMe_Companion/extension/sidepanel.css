@@ -384,3 +384,56 @@ footer a { color: var(--muted); }
 .recent-open:hover .recent-main span:first-child { color: var(--accent); }
 .recent-remove { display: grid; width: 22px; height: 22px; place-items: center; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #748078; padding: 0; font-size: 15px; line-height: 1; cursor: pointer; }
 .recent-remove:hover { border-color: rgba(239,125,115,.28); background: rgba(239,125,115,.06); color: #ef7d73; }
+
+/* JournalMe Companion v0.6 cloud sign-in */
+.auth-card {
+  display: grid;
+  gap: 12px;
+  border-color: rgba(116,215,163,.14);
+  background:
+    radial-gradient(circle at 88% 0, rgba(116,215,163,.06), transparent 42%),
+    var(--surface);
+}
+
+.auth-card[hidden] { display: none; }
+
+.auth-card label {
+  gap: 5px;
+}
+
+.auth-card input {
+  min-height: 40px;
+}
+
+.auth-links {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+
+.auth-links .text-btn {
+  color: #aebbb2;
+}
+
+.auth-links .text-btn:hover {
+  color: var(--accent);
+}
+
+#authError:empty {
+  display: none;
+}
+
+.account-hint {
+  color: #6f7c73;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.connection-actions {
+  flex: 0 0 auto;
+}
+
+#signOutBtn {
+  white-space: nowrap;
+}

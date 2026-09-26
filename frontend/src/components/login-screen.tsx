@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { type FormEvent, useState } from "react";
 
@@ -30,11 +31,10 @@ export function LoginScreen() {
   }
 
   return (
-    <main className="login-page">
-      <section className="card login-card" aria-labelledby="login-title">
+    <main className="login-page auth-page">
+      <section className="card login-card auth-card" aria-labelledby="login-title">
         <BrandMark />
-        <div>
-          <p className="eyebrow">Private trading journal</p>
+        <div className="auth-heading">
           <h1 id="login-title">Welcome back</h1>
           <p className="muted">Sign in to continue to your JournalMe workspace.</p>
         </div>
@@ -51,8 +51,12 @@ export function LoginScreen() {
             />
           </label>
           <label>
-            Password
+            <span className="auth-label-row">
+              <span>Password</span>
+              <Link href="/forgot-password">Forgot password?</Link>
+            </span>
             <input
+              aria-label="Password"
               type="password"
               autoComplete="current-password"
               value={password}
@@ -68,6 +72,9 @@ export function LoginScreen() {
             {submitting ? "Signing in…" : "Sign in"}
           </button>
         </form>
+        <p className="auth-switch">
+          New to JournalMe? <Link href="/register">Create an account</Link>
+        </p>
       </section>
     </main>
   );

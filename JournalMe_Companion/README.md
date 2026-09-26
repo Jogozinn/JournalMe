@@ -1,36 +1,36 @@
-# JournalMe Companion v0.5.0
+# JournalMe Companion v0.6.0
 
-JournalMe Companion can now connect to the hosted JournalMe web session and save captures into the same cloud account used by the web app.
+JournalMe Companion signs directly into JournalMe cloud and can save captures even when the JournalMe website has never been opened in the current browser session.
 
-## Hosted connection
+## Cloud sign-in
 
 1. Load the `extension` folder as an unpacked Chrome extension.
 2. Open the Companion side panel.
-3. Choose `Connect web`.
-4. JournalMe opens a one-time connection page.
-5. Approve `Connect Companion` while signed in.
-6. Return to the chart. The Companion now shows the connected JournalMe account.
+3. Sign in with the same JournalMe email and password used on the web app.
+4. The Companion loads that user's JournalMe accounts and recent captures.
+5. The stored Supabase user session refreshes automatically in Chrome extension storage.
 
-The connection stores the Supabase browser session inside Chrome extension storage and refreshes it when needed. The service-role key is never used by the extension.
+The extension never uses the Supabase service-role key or database credentials. It obtains only browser-safe hosted auth configuration from the JournalMe API and sends the signed-in user's bearer token with JournalMe API requests.
 
 ## Capture flow
 
 - `Alt+C` captures the current chart and opens the side panel.
 - Choose the JournalMe account, capture type, side, context, execution notes, state, and optional free text.
-- `Save capture` writes to the configured JournalMe API with the hosted bearer token when connected.
-- After save, an existing JournalMe web tab is routed in the background to the exact capture. If no JournalMe tab exists, one is created in the background.
-- `Open saved` brings that capture to the foreground.
-- Recent captures in the side panel open the matching item in the web Capture workspace.
+- `Save capture` writes directly to the hosted JournalMe API.
+- The JournalMe website does not need to be open for capture or sync.
+- `Open JournalMe` and `Open saved` are optional shortcuts to the full web journal.
+- A new user with no trading accounts can still save captures to their JournalMe user record. The Companion clearly indicates that no trading account exists yet.
 
-## Local mode
+## Production defaults
 
-`Use local` returns the Companion to the local API at `http://127.0.0.1:8066`. Hosted and local modes remain separate.
+- Web app: `https://journalme-beige.vercel.app`
+- API root: `https://p01--journalme-api--z928s7lw8hps.code.run`
 
-## Development origins
+## Local development
 
-The current external connection allow-list supports:
+Open the extension options page and switch Connection mode to `Local development`. Local development can continue to use:
 
-- `http://localhost:3070/*`
-- `http://127.0.0.1:3070/*`
+- API: `http://127.0.0.1:8066`
+- Web: `http://localhost:3070`
 
-Add the final production JournalMe web origin to `externally_connectable.matches` before publishing the extension.
+Existing users upgrading from the old untouched localhost defaults are migrated to the hosted production defaults. Explicit custom settings are preserved.

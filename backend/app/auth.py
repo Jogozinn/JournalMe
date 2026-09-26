@@ -8,7 +8,7 @@ except ImportError:  # pragma: no cover - exercised only in an incomplete deploy
     jwt = None  # type: ignore[assignment]
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -97,10 +97,34 @@ class SupabaseIdentityProvider:
             )
         )
         if identity is None:
-            raise HTTPException(
-                status.HTTP_403_FORBIDDEN,
-                "No JournalMe user is linked to this authenticated Supabase account.",
+            email = claims.get("email")
+            if not isinstance(email, str) or not email.strip():
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    "The authenticated Supabase account is missing an email address.",
+                )
+            normalized_email = email.strip().lower()
+            user = db.scalar(select(User).where(func.lower(User.email) == normalized_email))
+            if user is None:
+                metadata = claims.get("user_metadata")
+                display_name = None
+                if isinstance(metadata, dict):
+                    candidate = metadata.get("display_name") or metadata.get("full_name") or metadata.get("name")
+                    if isinstance(candidate, str) and candidate.strip():
+                        display_name = candidate.strip()[:120]
+                user = User(
+                    email=normalized_email,
+                    display_name=display_name or normalized_email.split("@", 1)[0][:120] or "Trader",
+                )
+                db.add(user)
+                db.flush()
+            identity = AuthIdentity(
+                user_id=user.id, provider="supabase", subject=subject
             )
+            db.add(identity)
+            db.commit()
+            db.refresh(user)
+            return user
         user = db.get(User, identity.user_id)
         if user is None:
             raise HTTPException(

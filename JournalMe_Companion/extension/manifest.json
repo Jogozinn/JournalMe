@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "JournalMe Companion",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "Capture a chart with one shortcut or one button and save it to your JournalMe account.",
   "permissions": [
     "activeTab",
@@ -13,7 +13,9 @@
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*",
-    "https://*.supabase.co/*"
+    "https://*.supabase.co/*",
+    "https://p01--journalme-api--z928s7lw8hps.code.run/*",
+    "https://journalme-beige.vercel.app/*"
   ],
   "background": {
     "service_worker": "service_worker.js"
@@ -40,7 +42,8 @@
   "externally_connectable": {
     "matches": [
       "http://localhost:3070/*",
-      "http://127.0.0.1:3070/*"
+      "http://127.0.0.1:3070/*",
+      "https://journalme-beige.vercel.app/*"
     ]
   },
   "optional_host_permissions": [

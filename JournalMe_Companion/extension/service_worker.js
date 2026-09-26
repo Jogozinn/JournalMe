@@ -1,7 +1,7 @@
 const DEFAULT_SETTINGS = {
-  apiBase: "http://127.0.0.1:8066",
-  appBase: "http://localhost:3070",
-  connectionMode: "local",
+  apiBase: "https://p01--journalme-api--z928s7lw8hps.code.run",
+  appBase: "https://journalme-beige.vercel.app",
+  connectionMode: "hosted",
   autoRouteAfterSave: true,
 };
 
@@ -96,9 +96,75 @@ async function beginConnect() {
   return { ok: true, url: url.toString() };
 }
 
+async function hostedPublicConfig(settings) {
+  const base = settings.apiBase.replace(/\/$/, "");
+  const response = await fetch(`${base}/api/v1/public-config`);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body.auth_mode !== "hosted" || !body.supabase_url || !body.supabase_anon_key) {
+    throw new Error(body?.detail || "JournalMe cloud authentication is not available.");
+  }
+  return {
+    supabaseUrl: body.supabase_url.replace(/\/$/, ""),
+    supabaseAnonKey: body.supabase_anon_key,
+  };
+}
+
+async function signInHosted(email, password) {
+  const settings = await getSettings();
+  const config = await hostedPublicConfig(settings);
+  const response = await fetch(`${config.supabaseUrl}/auth/v1/token?grant_type=password`, {
+    method: "POST",
+    headers: {
+      apikey: config.supabaseAnonKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ email: String(email || "").trim(), password: String(password || "") }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || !body.access_token || !body.refresh_token) {
+    throw new Error(body?.msg || body?.error_description || body?.message || "JournalMe sign in failed.");
+  }
+  const auth = {
+    accessToken: body.access_token,
+    refreshToken: body.refresh_token,
+    expiresAt: body.expires_at || Math.floor(Date.now() / 1000) + Number(body.expires_in || 3600),
+    supabaseUrl: config.supabaseUrl,
+    supabaseAnonKey: config.supabaseAnonKey,
+    userEmail: body.user?.email || String(email || "").trim(),
+    connectedAt: Date.now(),
+  };
+  await chrome.storage.local.set({
+    companionAuth: auth,
+    settings: { ...settings, connectionMode: "hosted" },
+  });
+  return { ok: true, userEmail: auth.userEmail };
+}
+
+async function signOutHosted() {
+  const data = await chrome.storage.local.get(["companionAuth", "settings"]);
+  const auth = data.companionAuth;
+  if (auth?.accessToken && auth?.supabaseUrl && auth?.supabaseAnonKey) {
+    try {
+      await fetch(`${auth.supabaseUrl.replace(/\/$/, "")}/auth/v1/logout`, {
+        method: "POST",
+        headers: {
+          apikey: auth.supabaseAnonKey,
+          Authorization: `Bearer ${auth.accessToken}`,
+        },
+      });
+    } catch (error) {
+      console.warn("JournalMe Companion remote sign out failed", error);
+    }
+  }
+  await chrome.storage.local.remove(["companionAuth", "pendingConnect", "companionAccountId"]);
+  const settings = { ...DEFAULT_SETTINGS, ...(data.settings || {}), connectionMode: "hosted" };
+  await chrome.storage.local.set({ settings });
+  return { ok: true };
+}
+
 async function refreshHostedSession(auth) {
   if (!auth?.refreshToken || !auth?.supabaseUrl || !auth?.supabaseAnonKey) {
-    throw new Error("JournalMe Companion needs to reconnect to the web app.");
+    throw new Error("JournalMe Companion needs you to sign in again.");
   }
   const response = await fetch(`${auth.supabaseUrl.replace(/\/$/, "")}/auth/v1/token?grant_type=refresh_token`, {
     method: "POST",
@@ -111,7 +177,7 @@ async function refreshHostedSession(auth) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok || !body.access_token) {
     await chrome.storage.local.remove("companionAuth");
-    throw new Error(body?.msg || body?.error_description || "JournalMe sign-in expired. Reconnect the Companion.");
+    throw new Error(body?.msg || body?.error_description || "JournalMe sign-in expired. Sign in again.");
   }
   const next = {
     ...auth,
@@ -132,7 +198,7 @@ async function getAuthContext() {
   const data = await chrome.storage.local.get("companionAuth");
   let auth = data.companionAuth;
   if (!auth?.accessToken) {
-    return { ok: false, mode: "hosted", settings, error: "Connect JournalMe Companion to the web app." };
+    return { ok: false, mode: "hosted", settings, error: "Sign in to JournalMe Companion." };
   }
   const now = Math.floor(Date.now() / 1000);
   if (!auth.expiresAt || Number(auth.expiresAt) <= now + 90) {
@@ -162,7 +228,18 @@ async function routeApp(path = "/", activate = false) {
   return { ok: true, reused: false, tabId: created.id };
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
+  const data = await chrome.storage.local.get("settings");
+  const current = data.settings || null;
+  const looksLikeLegacyLocalDefaults = current &&
+    current.apiBase === "http://127.0.0.1:8066" &&
+    current.appBase === "http://localhost:3070" &&
+    current.connectionMode === "local";
+
+  if (!current || (details.reason === "update" && looksLikeLegacyLocalDefaults)) {
+    await chrome.storage.local.set({ settings: { ...DEFAULT_SETTINGS } });
+    return;
+  }
   await getSettings();
 });
 
@@ -220,6 +297,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: String(error?.message || error) });
       }
     })();
+    return true;
+  }
+
+  if (message?.type === "SIGN_IN_HOSTED") {
+    signInHosted(message.email, message.password)
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
+    return true;
+  }
+
+  if (message?.type === "SIGN_OUT_HOSTED") {
+    signOutHosted()
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, error: String(error?.message || error) }));
     return true;
   }
 

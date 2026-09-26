@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const api = vi.fn();
+const { api } = vi.hoisted(() => ({ api: vi.fn() }));
 
 vi.mock("@/lib/api", () => ({ api }));
 
