@@ -58,8 +58,9 @@ export default function SettingsPage() {
       <PageHeader eyebrow="Personal workspace" title="Settings" description="Defaults should reduce friction without hiding where financial data came from." />
       {error && <ErrorState message={error} />}
       <section className="settings-link-grid">
-        <Link className="card more-card" href="/settings/connections"><div><h2>Broker connections</h2><p>Quick Sync Tradovate reports now, with a clean path to official API connectors later.</p></div></Link>
-        <Link className="card more-card" href="/captures"><div><h2>Chrome Companion</h2><p>Review chart captures saved from the browser sidebar. The Companion can sign in and sync without the JournalMe website being open.</p></div></Link>
+        <Link className="card more-card" href="/settings/connections"><div><h2>Broker connections</h2><p>Manage live desktop bridges, catch-up connectors, and sync health.</p></div></Link>
+        <Link className="card more-card" href="/intelligence"><div><h2>Trader intelligence</h2><p>Choose the accounts that contribute to cross-account learning.</p></div></Link>
+        <Link className="card more-card" href="/captures"><div><h2>Chrome Companion</h2><p>Review chart captures saved from the browser sidebar. Use Connect web inside the extension to link this account.</p></div></Link>
         <Link className="card more-card" href="/accounts"><div><h2>Accounts & prop rules</h2><p>Identity, account types, timezone, notes, groups, and configurable limits.</p></div></Link>
         <Link className="card more-card" href="/playbooks"><div><h2>Playbooks</h2><p>Trading plans, ordered checklists, examples, and archive state.</p></div></Link>
         <Link className="card more-card" href="/goals"><div><h2>Goals</h2><p>Calm metric-linked goals for daily, weekly, monthly, or custom periods.</p></div></Link>

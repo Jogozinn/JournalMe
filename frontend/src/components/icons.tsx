@@ -8,6 +8,7 @@ export type IconName =
   | "calendar"
   | "more"
   | "analytics"
+  | "intelligence"
   | "journal"
   | "days"
   | "playbook"
@@ -28,6 +29,7 @@ const paths: Record<IconName, React.ReactNode> = {
   calendar: <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M7 3v4M17 3v4M3 10h18" /></>,
   more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
   analytics: <><path d="M4 20V10M10 20V4M16 20v-7M22 20H2" /></>,
+  intelligence: <><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" /></>,
   journal: <><path d="M5 4h12a2 2 0 0 1 2 2v15H7a2 2 0 0 1-2-2V4Z" /><path d="M8 8h8M8 12h6" /></>,
   days: <><path d="M7 3v3M17 3v3M4 8h16v12H4z" /><path d="M8 12h3M13 12h3M8 16h3" /></>,
   playbook: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v17H6.5A2.5 2.5 0 0 0 4 22z" /><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v17h4.5A2.5 2.5 0 0 1 20 22z" /></>,

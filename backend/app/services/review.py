@@ -178,20 +178,39 @@ def day_review_status(
     rules: dict[str, Any],
 ) -> dict[str, Any]:
     missing: list[str] = []
-    for field_name in rules["day_fields"]:
-        if field_name not in DEFAULT_DAY_FIELDS:
-            continue
-        value = getattr(journal, field_name, None) if journal else None
-        if value is None or (isinstance(value, str) and not value.strip()):
-            missing.append(DEFAULT_DAY_FIELDS[field_name])
+    quick_complete = bool(
+        journal
+        and journal.review_depth == "quick"
+        and journal.quick_rating
+    )
+    if quick_complete:
+        if journal.followed_rules is None:
+            missing.append("followed-rules answer")
+        total = 2 + int(bool(trade_statuses))
+        complete = 2 - int(journal.followed_rules is None)
+    else:
+        for field_name in rules["day_fields"]:
+            if field_name not in DEFAULT_DAY_FIELDS:
+                continue
+            value = getattr(journal, field_name, None) if journal else None
+            if value is None or (isinstance(value, str) and not value.strip()):
+                missing.append(DEFAULT_DAY_FIELDS[field_name])
+        total = len(rules["day_fields"]) + int(bool(trade_statuses))
+        complete = max(len(rules["day_fields"]) - len(missing), 0)
+
     incomplete_trades = sum(item["status"] != "complete" for item in trade_statuses)
-    if incomplete_trades:
-        missing.append(f"{incomplete_trades} incomplete trade review(s)")
-    total = len(rules["day_fields"]) + int(bool(trade_statuses))
-    complete = max(total - len(missing), 0)
+    if not quick_complete:
+        if incomplete_trades:
+            missing.append(f"{incomplete_trades} incomplete trade review(s)")
+        elif trade_statuses:
+            complete += 1
+    elif trade_statuses:
+        # Quick day reviews deliberately do not force an essay-style review for every trade.
+        total -= 1
+    complete = max(total - len(missing), complete, 0)
     return {
         "status": "complete" if not missing else "unreviewed" if complete == 0 else "partial",
         "missing": missing,
-        "completed_requirements": complete,
+        "completed_requirements": min(complete, total),
         "total_requirements": total,
     }

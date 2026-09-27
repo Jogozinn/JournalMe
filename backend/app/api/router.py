@@ -19,6 +19,8 @@ from app.database import get_db
 from app.domain import TradeSide
 from app.models import (
     Attachment,
+    BrokerConnection,
+    BrokerExecutionEvent,
     CashTransaction,
     DailyBalance,
     DailyJournal,
@@ -41,6 +43,9 @@ from app.schemas import (
     AccountCreate,
     AccountFromPresetCreate,
     AccountUpdate,
+    BrokerConnectionCreate,
+    BrokerConnectionUpdate,
+    BrokerExecutionIngest,
     DailyJournalUpdate,
     GoalCreate,
     GoalUpdate,
@@ -57,6 +62,7 @@ from app.services.balance import (
     resolve_account_balances,
 )
 from app.services.import_sessions import build_preview, commit_import
+from app.services.intelligence import build_intelligence_overview
 from app.services.importer import (
     ImportReportValidationError,
     ParsedReport,
@@ -170,6 +176,7 @@ def _account_dict(
         "currency": account.currency,
         "notes": account.notes,
         "active": account.active,
+        "include_in_learning": account.include_in_learning,
         "lifecycle_status": account.lifecycle_status.value,
         "net_pnl": _decimal(net_pnl),
     }
@@ -1077,6 +1084,213 @@ def analytics(account_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
         "by_mistake": _tag_performance(trades, "mistake"),
         "imported_balances": balance_comparisons,
     }
+
+
+@router.get("/intelligence/overview")
+def intelligence_overview(
+    db: Db,
+    user: CurrentUser,
+    account_ids: list[UUID] = Query(default=[]),
+    current_account_id: UUID | None = None,
+) -> dict[str, Any]:
+    statement = select(TradingAccount).where(TradingAccount.user_id == user.id)
+    if account_ids:
+        statement = statement.where(TradingAccount.id.in_(account_ids))
+    else:
+        statement = statement.where(TradingAccount.include_in_learning.is_(True))
+    accounts = list(db.scalars(statement.order_by(TradingAccount.created_at)).all())
+    if account_ids and len(accounts) != len(set(account_ids)):
+        raise HTTPException(status_code=404, detail="One or more learning accounts were not found.")
+    if not accounts:
+        return build_intelligence_overview([], [], [], current_account_id=current_account_id)
+    selected_ids = [account.id for account in accounts]
+    trades = list(
+        db.scalars(
+            select(Trade)
+            .where(Trade.account_id.in_(selected_ids))
+            .order_by(Trade.account_id, Trade.entry_timestamp)
+        ).all()
+    )
+    journals = list(
+        db.scalars(
+            select(DailyJournal)
+            .where(DailyJournal.account_id.in_(selected_ids))
+            .order_by(DailyJournal.account_id, DailyJournal.trading_date)
+        ).all()
+    )
+    if current_account_id is not None and current_account_id not in selected_ids:
+        _account_or_404(db, user, current_account_id)
+    return build_intelligence_overview(
+        accounts,
+        trades,
+        journals,
+        current_account_id=current_account_id,
+    )
+
+
+def _broker_connection_or_404(
+    db: Session, user: User, connection_id: UUID
+) -> BrokerConnection:
+    connection = db.scalar(
+        select(BrokerConnection).where(
+            BrokerConnection.id == connection_id,
+            BrokerConnection.user_id == user.id,
+        )
+    )
+    if connection is None:
+        raise HTTPException(status_code=404, detail="Broker connection not found.")
+    return connection
+
+
+def _broker_connection_dict(connection: BrokerConnection) -> dict[str, Any]:
+    return {
+        "id": str(connection.id),
+        "account_id": str(connection.account_id) if connection.account_id else None,
+        "provider": connection.provider,
+        "connection_type": connection.connection_type,
+        "display_name": connection.display_name,
+        "status": connection.status,
+        "external_account_id": connection.external_account_id,
+        "metadata_json": connection.metadata_json,
+        "last_seen_at": _timestamp(connection.last_seen_at),
+        "last_sync_at": _timestamp(connection.last_sync_at),
+        "created_at": _timestamp(connection.created_at),
+        "updated_at": _timestamp(connection.updated_at),
+    }
+
+
+@router.get("/broker-connections")
+def list_broker_connections(db: Db, user: CurrentUser) -> list[dict[str, Any]]:
+    items = db.scalars(
+        select(BrokerConnection)
+        .where(BrokerConnection.user_id == user.id)
+        .order_by(BrokerConnection.created_at)
+    ).all()
+    return [_broker_connection_dict(item) for item in items]
+
+
+@router.post("/broker-connections", status_code=status.HTTP_201_CREATED)
+def create_broker_connection(
+    payload: BrokerConnectionCreate, db: Db, user: CurrentUser
+) -> dict[str, Any]:
+    if payload.account_id is not None:
+        _account_or_404(db, user, payload.account_id)
+    item = BrokerConnection(user_id=user.id, status="disconnected", **payload.model_dump())
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return _broker_connection_dict(item)
+
+
+@router.patch("/broker-connections/{connection_id}")
+def update_broker_connection(
+    connection_id: UUID,
+    payload: BrokerConnectionUpdate,
+    db: Db,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    item = _broker_connection_or_404(db, user, connection_id)
+    updates = payload.model_dump(exclude_unset=True)
+    if "account_id" in updates and updates["account_id"] is not None:
+        _account_or_404(db, user, updates["account_id"])
+    for key, value in updates.items():
+        setattr(item, key, value)
+    if updates.get("status") == "connected":
+        item.last_seen_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(item)
+    return _broker_connection_dict(item)
+
+
+@router.post("/broker-connections/{connection_id}/heartbeat")
+def broker_connection_heartbeat(
+    connection_id: UUID, db: Db, user: CurrentUser
+) -> dict[str, Any]:
+    item = _broker_connection_or_404(db, user, connection_id)
+    item.status = "connected"
+    item.last_seen_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(item)
+    return _broker_connection_dict(item)
+
+
+@router.post("/broker-executions", status_code=status.HTTP_201_CREATED)
+def ingest_broker_execution(
+    payload: BrokerExecutionIngest, db: Db, user: CurrentUser
+) -> dict[str, Any]:
+    connection = _broker_connection_or_404(db, user, payload.connection_id)
+    account_id = payload.account_id or connection.account_id
+    if account_id is not None:
+        _account_or_404(db, user, account_id)
+    existing = db.scalar(
+        select(BrokerExecutionEvent).where(
+            BrokerExecutionEvent.connection_id == connection.id,
+            BrokerExecutionEvent.external_execution_id == payload.external_execution_id,
+        )
+    )
+    if existing is not None:
+        return {
+            "id": str(existing.id),
+            "duplicate": True,
+            "ingest_status": existing.ingest_status,
+        }
+    item = BrokerExecutionEvent(
+        user_id=user.id,
+        account_id=account_id,
+        connection_id=connection.id,
+        provider=connection.provider,
+        external_execution_id=payload.external_execution_id,
+        external_order_id=payload.external_order_id,
+        symbol=payload.symbol,
+        side=payload.side,
+        quantity=payload.quantity,
+        price=payload.price,
+        commission=payload.commission,
+        executed_at=payload.executed_at,
+        ingest_status="received",
+        source_payload=payload.source_payload,
+    )
+    connection.status = "connected"
+    connection.last_seen_at = datetime.now(timezone.utc)
+    connection.last_sync_at = datetime.now(timezone.utc)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return {"id": str(item.id), "duplicate": False, "ingest_status": item.ingest_status}
+
+
+@router.get("/broker-executions")
+def list_broker_executions(
+    db: Db,
+    user: CurrentUser,
+    account_id: UUID | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> list[dict[str, Any]]:
+    statement = select(BrokerExecutionEvent).where(BrokerExecutionEvent.user_id == user.id)
+    if account_id is not None:
+        _account_or_404(db, user, account_id)
+        statement = statement.where(BrokerExecutionEvent.account_id == account_id)
+    items = db.scalars(
+        statement.order_by(BrokerExecutionEvent.executed_at.desc()).limit(limit)
+    ).all()
+    return [
+        {
+            "id": str(item.id),
+            "account_id": str(item.account_id) if item.account_id else None,
+            "connection_id": str(item.connection_id),
+            "provider": item.provider,
+            "external_execution_id": item.external_execution_id,
+            "external_order_id": item.external_order_id,
+            "symbol": item.symbol,
+            "side": item.side,
+            "quantity": _decimal(item.quantity),
+            "price": _decimal(item.price),
+            "commission": _decimal(item.commission),
+            "executed_at": _timestamp(item.executed_at),
+            "ingest_status": item.ingest_status,
+        }
+        for item in items
+    ]
 
 
 @router.get("/reconciliation-warnings")

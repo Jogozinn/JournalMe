@@ -25,6 +25,7 @@ class AccountCreate(BaseModel):
     timezone: str = "America/New_York"
     currency: str = Field(default="USD", min_length=3, max_length=3)
     notes: str | None = Field(default=None, max_length=5000)
+    include_in_learning: bool = True
 
 
 class AccountUpdate(BaseModel):
@@ -34,6 +35,7 @@ class AccountUpdate(BaseModel):
     timezone: str | None = None
     active: bool | None = None
     lifecycle_status: AccountLifecycleStatus | None = None
+    include_in_learning: bool | None = None
     notes: str | None = Field(default=None, max_length=5000)
 
 
@@ -51,6 +53,12 @@ class DailyJournalUpdate(BaseModel):
     allowed_playbook_ids: list[UUID] | None = None
     prohibited_behaviors: list[str] | None = Field(default=None, max_length=50)
     checklist_json: list[dict[str, object]] | None = Field(default=None, max_length=100)
+    quick_rating: Literal["great", "good", "mixed", "bad", "custom"] | None = None
+    quick_focus_tags_json: list[str] | None = Field(default=None, max_length=20)
+    quick_emotion_tags_json: list[str] | None = Field(default=None, max_length=20)
+    quick_behavior_tags_json: list[str] | None = Field(default=None, max_length=20)
+    quick_note: str | None = Field(default=None, max_length=2000)
+    review_depth: Literal["quick", "deep"] | None = None
     post_session_rating: int | None = Field(default=None, ge=1, le=5)
     day_grade: Literal["A+", "A", "B", "C", "D", "F"] | None = None
     best_decision: str | None = None
@@ -451,3 +459,33 @@ class ManualAdjustmentUpdate(BaseModel):
 class ManualDeleteRequest(BaseModel):
     confirmation: str
     reason: str = Field(min_length=1, max_length=500)
+
+class BrokerConnectionCreate(BaseModel):
+    provider: str = Field(min_length=1, max_length=60)
+    connection_type: Literal["desktop_bridge", "browser_session", "official_api", "file_import"]
+    display_name: str = Field(min_length=1, max_length=160)
+    account_id: UUID | None = None
+    external_account_id: str | None = Field(default=None, max_length=120)
+    metadata_json: dict[str, object] = Field(default_factory=dict)
+
+
+class BrokerConnectionUpdate(BaseModel):
+    account_id: UUID | None = None
+    display_name: str | None = Field(default=None, min_length=1, max_length=160)
+    status: Literal["connected", "disconnected", "degraded", "error"] | None = None
+    external_account_id: str | None = Field(default=None, max_length=120)
+    metadata_json: dict[str, object] | None = None
+
+
+class BrokerExecutionIngest(BaseModel):
+    connection_id: UUID
+    account_id: UUID | None = None
+    external_execution_id: str = Field(min_length=1, max_length=160)
+    external_order_id: str | None = Field(default=None, max_length=160)
+    symbol: str = Field(min_length=1, max_length=80)
+    side: Literal["buy", "sell", "long", "short"]
+    quantity: Decimal = Field(gt=0)
+    price: Decimal
+    commission: Decimal | None = None
+    executed_at: datetime
+    source_payload: dict[str, object] = Field(default_factory=dict)

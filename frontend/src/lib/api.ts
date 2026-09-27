@@ -25,6 +25,8 @@ function cacheTtl(path: string): number {
     path.startsWith("/trades") ||
     path.startsWith("/calendar") ||
     path.startsWith("/analytics") ||
+    path.startsWith("/intelligence") ||
+    path.startsWith("/broker-connections") ||
     path.startsWith("/goals") ||
     path.startsWith("/prop-rules")
   ) return 8_000;

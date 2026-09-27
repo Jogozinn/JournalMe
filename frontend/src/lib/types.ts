@@ -8,6 +8,7 @@ export type Account = {
   timezone: string;
   currency: string;
   active: boolean;
+  include_in_learning: boolean;
   notes: string | null;
   current_balance: string | null;
   net_pnl: string | null;

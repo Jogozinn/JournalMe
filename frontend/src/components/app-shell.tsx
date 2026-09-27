@@ -18,6 +18,7 @@ const nav: { href: string; label: string; icon: IconName }[] = [
   { href: "/captures", label: "Captures", icon: "capture" },
   { href: "/calendar", label: "Calendar", icon: "calendar" },
   { href: "/analytics", label: "Analytics", icon: "analytics" },
+  { href: "/intelligence", label: "Intelligence", icon: "intelligence" },
   { href: "/playbooks", label: "Playbooks", icon: "playbook" },
   { href: "/review", label: "Reviews", icon: "review" },
 ];
@@ -41,6 +42,7 @@ const PROTECTED_PREFIXES = [
   "/captures",
   "/calendar",
   "/analytics",
+  "/intelligence",
   "/playbooks",
   "/review",
   "/reviews",
@@ -205,7 +207,7 @@ function ShellContent({ children }: { children: React.ReactNode }) {
             </Link>
           ))}
         </nav>
-        <Link href="/import" className="sidebar-import" onMouseEnter={() => router.prefetch("/import")} onFocus={() => router.prefetch("/import")} title="Import data">
+        <Link href="/import" className="button sidebar-import" onMouseEnter={() => router.prefetch("/import")} onFocus={() => router.prefetch("/import")} title="Import data">
           <Icon name="import" />
           <span>Import data</span>
         </Link>
@@ -265,7 +267,7 @@ function ShellContent({ children }: { children: React.ReactNode }) {
             <span>{item.label}</span>
           </Link>
         ))}
-        <Link href="/settings/connections" className="import-action" aria-label="Sync broker data" title="Sync broker data">
+        <Link href="/import" className="import-action" aria-label="Import trading data">
           <Icon name="import" />
         </Link>
         <Link href="/calendar" className={routeMatches(activePath, "/calendar") ? "active" : ""}>

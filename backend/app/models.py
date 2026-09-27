@@ -106,6 +106,7 @@ class TradingAccount(Base):
     currency: Mapped[str] = mapped_column(String(3), default="USD")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    include_in_learning: Mapped[bool] = mapped_column(Boolean, default=True)
     lifecycle_status: Mapped[AccountLifecycleStatus] = mapped_column(
         Enum(
             AccountLifecycleStatus,
@@ -125,6 +126,71 @@ class TradingAccount(Base):
 
     __table_args__ = (
         UniqueConstraint("user_id", "provider", "external_account_id", name="uq_account_external"),
+    )
+
+
+class BrokerConnection(Base):
+    __tablename__ = "broker_connections"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    account_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("trading_accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(60))
+    connection_type: Mapped[str] = mapped_column(String(40), default="desktop_bridge")
+    display_name: Mapped[str] = mapped_column(String(160))
+    status: Mapped[str] = mapped_column(String(30), default="disconnected", index=True)
+    external_account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "provider", "connection_type", "external_account_id",
+            name="uq_broker_connection_external",
+        ),
+    )
+
+
+class BrokerExecutionEvent(Base):
+    __tablename__ = "broker_execution_events"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    account_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("trading_accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    connection_id: Mapped[UUID] = mapped_column(
+        ForeignKey("broker_connections.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(60), index=True)
+    external_execution_id: Mapped[str] = mapped_column(String(160))
+    external_order_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(80), index=True)
+    side: Mapped[str] = mapped_column(String(10))
+    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    price: Mapped[Decimal] = mapped_column(PRICE)
+    commission: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ingest_status: Mapped[str] = mapped_column(String(30), default="received", index=True)
+    source_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "connection_id", "external_execution_id", name="uq_broker_execution_external"
+        ),
+        Index("ix_broker_execution_account_time", "account_id", "executed_at"),
     )
 
 
@@ -398,6 +464,12 @@ class DailyJournal(Base):
     allowed_playbook_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
     prohibited_behaviors: Mapped[list[str]] = mapped_column(JSON, default=list)
     checklist_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    quick_rating: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    quick_focus_tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    quick_emotion_tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    quick_behavior_tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    quick_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_depth: Mapped[str] = mapped_column(String(20), default="quick")
     post_session_rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     day_grade: Mapped[str | None] = mapped_column(String(3), nullable=True)
     best_decision: Mapped[str | None] = mapped_column(Text, nullable=True)

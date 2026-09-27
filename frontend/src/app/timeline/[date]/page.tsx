@@ -28,6 +28,17 @@ type Timeline = {
   };
 };
 
+const QUICK_RATINGS = [
+  ["great", "Great"],
+  ["good", "Good"],
+  ["mixed", "Mixed"],
+  ["bad", "Bad"],
+] as const;
+
+const QUICK_FOCUS = ["Followed plan", "Patience", "Entries", "Risk", "Exits", "Overtrading"];
+const QUICK_EMOTIONS = ["Focused", "Calm", "Confident", "Frustrated", "Impatient", "Tired", "Anxious"];
+const QUICK_BEHAVIORS = ["Chased", "FOMO", "Revenge traded", "Oversized", "Moved stop", "Exited early", "Good patience"];
+
 export default function TimelinePage() {
   const { date } = useParams<{ date: string }>();
   const { account, loading } = useAccount();
@@ -37,6 +48,13 @@ export default function TimelinePage() {
   const [saving, setSaving] = useState(false);
   const [replay, setReplay] = useState(false);
   const [replayIndex, setReplayIndex] = useState(0);
+  const [quickRating, setQuickRating] = useState("");
+  const [quickFocus, setQuickFocus] = useState<string[]>([]);
+  const [quickEmotions, setQuickEmotions] = useState<string[]>([]);
+  const [quickBehaviors, setQuickBehaviors] = useState<string[]>([]);
+  const [quickNote, setQuickNote] = useState("");
+  const [quickFollowedRules, setQuickFollowedRules] = useState("");
+  const [reviewDepth, setReviewDepth] = useState<"quick" | "deep">("quick");
 
   const load = () => {
     if (!account) return;
@@ -49,11 +67,23 @@ export default function TimelinePage() {
         setPlaybooks(nextPlaybooks);
         setError("");
         setReplayIndex(0);
+        const nextJournal = timeline.journal ?? {};
+        setQuickRating(String(nextJournal.quick_rating ?? ""));
+        setQuickFocus(Array.isArray(nextJournal.quick_focus_tags_json) ? nextJournal.quick_focus_tags_json as string[] : []);
+        setQuickEmotions(Array.isArray(nextJournal.quick_emotion_tags_json) ? nextJournal.quick_emotion_tags_json as string[] : []);
+        setQuickBehaviors(Array.isArray(nextJournal.quick_behavior_tags_json) ? nextJournal.quick_behavior_tags_json as string[] : []);
+        setQuickNote(String(nextJournal.quick_note ?? ""));
+        setQuickFollowedRules(nextJournal.followed_rules === null || nextJournal.followed_rules === undefined ? "" : String(nextJournal.followed_rules));
+        setReviewDepth(nextJournal.review_depth === "deep" ? "deep" : "quick");
       })
       .catch((reason: Error) => setError(reason.message));
   };
 
   useEffect(load, [account, date]);
+
+  function toggleQuickTag(value: string, current: string[], setter: (next: string[]) => void) {
+    setter(current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
+  }
 
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -78,6 +108,12 @@ export default function TimelinePage() {
           allowed_playbook_ids: form.getAll("allowed_playbook_ids"),
           prohibited_behaviors: String(form.get("prohibited_behaviors") || "").split("\n").map((item) => item.trim()).filter(Boolean),
           checklist_json: String(form.get("checklist") || "").split("\n").map((text, index) => ({ text: text.trim(), complete: false, sort_order: index })).filter((item) => item.text),
+          quick_rating: quickRating || null,
+          quick_focus_tags_json: quickFocus,
+          quick_emotion_tags_json: quickEmotions,
+          quick_behavior_tags_json: quickBehaviors,
+          quick_note: quickNote || null,
+          review_depth: reviewDepth,
           day_grade: value("day_grade"),
           best_decision: value("best_decision"),
           biggest_mistake: value("biggest_mistake"),
@@ -86,7 +122,7 @@ export default function TimelinePage() {
           what_did_not_work: value("what_did_not_work"),
           lesson_learned: value("lesson_learned"),
           focus_for_next_session: value("focus_for_next_session"),
-          followed_rules: form.get("followed_rules") === "" ? null : form.get("followed_rules") === "true",
+          followed_rules: quickFollowedRules === "" ? null : quickFollowedRules === "true",
           tomorrow_note: value("tomorrow_note"),
         }),
       });
@@ -215,9 +251,37 @@ export default function TimelinePage() {
         </div>
 
         <form className="card daily-journal-form premium-journal-form" onSubmit={save}>
-          <div className="journal-form-head"><p className="eyebrow">Daily journal · {account.timezone}</p><h2>Plan, execute, reflect</h2><p className="completion-note">{data.review.missing.length ? `Still needed: ${data.review.missing.join(" · ")}` : "Daily review complete."}</p></div>
+          <div className="journal-form-head"><p className="eyebrow">Daily review · {account.timezone}</p><h2>Check in first. Add detail only when it helps.</h2><p className="completion-note">{data.review.missing.length ? `Still needed: ${data.review.missing.join(" · ")}` : "Daily review complete."}</p></div>
 
-          <details className="journal-section" open={data.trades.length === 0}>
+          <section className="quick-review-panel" aria-label="Quick daily review">
+            <div className="quick-review-mode">
+              <button className={reviewDepth === "quick" ? "active" : ""} type="button" onClick={() => setReviewDepth("quick")}>Quick review</button>
+              <button className={reviewDepth === "deep" ? "active" : ""} type="button" onClick={() => setReviewDepth("deep")}>Deep review</button>
+            </div>
+            <div className="quick-review-question">
+              <span>How was your trading today?</span>
+              <div className="quick-choice-row">{QUICK_RATINGS.map(([value, label]) => <button key={value} className={quickRating === value ? "selected" : ""} type="button" onClick={() => setQuickRating(value)}>{label}</button>)}</div>
+            </div>
+            <div className="quick-review-question">
+              <span>Did you follow your rules?</span>
+              <div className="quick-choice-row"><button className={quickFollowedRules === "true" ? "selected" : ""} type="button" onClick={() => setQuickFollowedRules("true")}>Yes</button><button className={quickFollowedRules === "false" ? "selected" : ""} type="button" onClick={() => setQuickFollowedRules("false")}>No</button></div>
+            </div>
+            <div className="quick-review-question">
+              <span>What mattered most?</span>
+              <div className="quick-chip-row">{QUICK_FOCUS.map((item) => <button key={item} className={quickFocus.includes(item) ? "selected" : ""} type="button" onClick={() => toggleQuickTag(item, quickFocus, setQuickFocus)}>{item}</button>)}</div>
+            </div>
+            <div className="quick-review-question">
+              <span>How did you feel?</span>
+              <div className="quick-chip-row">{QUICK_EMOTIONS.map((item) => <button key={item} className={quickEmotions.includes(item) ? "selected" : ""} type="button" onClick={() => toggleQuickTag(item, quickEmotions, setQuickEmotions)}>{item}</button>)}</div>
+            </div>
+            <div className="quick-review-question">
+              <span>Anything JournalMe should remember?</span>
+              <div className="quick-chip-row">{QUICK_BEHAVIORS.map((item) => <button key={item} className={quickBehaviors.includes(item) ? "selected" : ""} type="button" onClick={() => toggleQuickTag(item, quickBehaviors, setQuickBehaviors)}>{item}</button>)}</div>
+              <input className="quick-note-input" value={quickNote} onChange={(event) => setQuickNote(event.target.value)} placeholder="Optional note" />
+            </div>
+          </section>
+
+          <details className="journal-section" open={reviewDepth === "deep" && data.trades.length === 0}>
             <summary><span>Before the session</span><small>Mindset, plan, bias, context</small></summary>
             <div className="journal-section-body">
               <div className="field"><label htmlFor="pre_session_mindset">Pre-session mindset</label><textarea id="pre_session_mindset" name="pre_session_mindset" defaultValue={String(journal.pre_session_mindset ?? "")} /></div>
@@ -238,7 +302,7 @@ export default function TimelinePage() {
             </div>
           </details>
 
-          <details className="journal-section" open={data.trades.length > 0}>
+          <details className="journal-section" open={reviewDepth === "deep" && data.trades.length > 0}>
             <summary><span>After the session</span><small>Decisions, mistakes, lessons</small></summary>
             <div className="journal-section-body">
               <div className="field"><label htmlFor="best_decision">Best decision</label><textarea id="best_decision" name="best_decision" defaultValue={String(journal.best_decision ?? "")} /></div>
@@ -249,7 +313,7 @@ export default function TimelinePage() {
               <div className="field"><label htmlFor="reflection">Reflection</label><textarea id="reflection" name="reflection" defaultValue={String(journal.reflection ?? "")} /></div>
               <div className="field"><label htmlFor="focus_for_next_session">Focus for next session</label><textarea id="focus_for_next_session" name="focus_for_next_session" defaultValue={String(journal.focus_for_next_session ?? "")} /></div>
               <div className="field"><label htmlFor="tomorrow_note">Tomorrow note</label><textarea id="tomorrow_note" name="tomorrow_note" defaultValue={String(journal.tomorrow_note ?? "")} /></div>
-              <div className="score-row"><div className="field"><label htmlFor="followed_rules">Followed daily rules</label><select id="followed_rules" name="followed_rules" defaultValue={journal.followed_rules === null || journal.followed_rules === undefined ? "" : String(journal.followed_rules)}><option value="">Not answered</option><option value="true">Yes</option><option value="false">No</option></select></div><div className="field"><label htmlFor="day_grade">Day grade</label><select id="day_grade" name="day_grade" defaultValue={String(journal.day_grade ?? "")}><option value="">Not graded</option>{["A+", "A", "B", "C", "D", "F"].map((grade) => <option key={grade}>{grade}</option>)}</select></div></div>
+              <div className="score-row"><div className="field"><label htmlFor="followed_rules">Followed daily rules</label><select id="followed_rules" name="followed_rules" value={quickFollowedRules} onChange={(event) => setQuickFollowedRules(event.target.value)}><option value="">Not answered</option><option value="true">Yes</option><option value="false">No</option></select></div><div className="field"><label htmlFor="day_grade">Day grade</label><select id="day_grade" name="day_grade" defaultValue={String(journal.day_grade ?? "")}><option value="">Not graded</option>{["A+", "A", "B", "C", "D", "F"].map((grade) => <option key={grade}>{grade}</option>)}</select></div></div>
             </div>
           </details>
 

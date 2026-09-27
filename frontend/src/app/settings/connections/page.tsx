@@ -1,180 +1,108 @@
 "use client";
 
-import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useAccount } from "@/components/account-provider";
-import { ErrorState, PageHeader } from "@/components/ui";
-import { api, dateTime } from "@/lib/api";
-import {
-  syncTradovateReports,
-  tradovateHasBalanceReport,
-  type BrokerSyncResult,
-} from "@/lib/broker-sync";
+import { ErrorState, PageHeader, Skeleton } from "@/components/ui";
+import { api } from "@/lib/api";
 
-type ImportHistoryItem = {
+type BrokerConnection = {
   id: string;
+  account_id: string | null;
+  provider: string;
+  connection_type: string;
+  display_name: string;
   status: string;
-  started_at: string;
-  committed_at: string | null;
-  file_count: number;
-  report_types: string[];
-  summary: {
-    commit?: {
-      trades?: number;
-      fills?: number;
-      orders?: number;
-      cash_transactions?: number;
-      daily_balances?: number;
-    };
-  } | null;
+  external_account_id: string | null;
+  metadata_json: Record<string, unknown>;
+  last_seen_at: string | null;
+  last_sync_at: string | null;
 };
 
-function syncSummary(result: BrokerSyncResult): string {
-  const parts = [
-    `${result.created.trades} new trade${result.created.trades === 1 ? "" : "s"}`,
-    `${result.created.fills} fill${result.created.fills === 1 ? "" : "s"}`,
-  ];
-  if (result.created.daily_balances) {
-    parts.push(`${result.created.daily_balances} balance snapshot${result.created.daily_balances === 1 ? "" : "s"}`);
-  }
-  return parts.join(" · ");
+function timeLabel(value: string | null) {
+  return value ? new Date(value).toLocaleString() : "Never";
 }
 
-export default function BrokerConnectionsPage() {
-  const { account, refresh } = useAccount();
-  const picker = useRef<HTMLInputElement>(null);
-  const [history, setHistory] = useState<ImportHistoryItem[]>([]);
-  const [busy, setBusy] = useState(false);
+export default function ConnectionsPage() {
+  const { account, accounts } = useAccount();
+  const [connections, setConnections] = useState<BrokerConnection[]>([]);
   const [error, setError] = useState("");
-  const [result, setResult] = useState<BrokerSyncResult | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
 
-  const loadHistory = useCallback(async () => {
-    try {
-      setHistory(await api<ImportHistoryItem[]>("/imports", { cache: "reload" }));
-    } catch {
-      // Import history is supporting context only. Sync still remains available.
-    }
+  const load = useCallback(() => {
+    setLoading(true);
+    return api<BrokerConnection[]>("/broker-connections")
+      .then((items) => {
+        setConnections(items);
+        setError("");
+      })
+      .catch((reason: Error) => setError(reason.message))
+      .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
-    void loadHistory();
-  }, [loadHistory]);
+    void load();
+  }, [load]);
 
-  const lastSync = useMemo(
-    () => history.find((item) => item.status === "committed" && item.report_types.some((type) => ["performance", "position_history", "fills"].includes(type))),
-    [history],
-  );
-
-  async function choose(files: FileList | null) {
-    if (!files?.length) return;
-    setBusy(true);
+  async function createNinjaTraderSlot() {
+    if (!account) return;
+    setCreating(true);
     setError("");
-    setResult(null);
     try {
-      const synced = await syncTradovateReports(Array.from(files), account?.id ?? null);
-      setResult(synced);
-      await Promise.all([refresh(), loadHistory()]);
+      await api("/broker-connections", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "ninjatrader",
+          connection_type: "desktop_bridge",
+          display_name: `NinjaTrader · ${account.name}`,
+          account_id: account.id,
+          external_account_id: account.external_account_id,
+          metadata_json: { mode: "read_only", stage: "probe" },
+        }),
+      });
+      await load();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Tradovate sync could not be completed.");
+      setError(reason instanceof Error ? reason.message : "Connection slot could not be created.");
     } finally {
-      setBusy(false);
-      if (picker.current) picker.current.value = "";
+      setCreating(false);
     }
   }
 
   return (
-    <>
+    <div className="connections-page">
       <PageHeader
         eyebrow="Broker connections"
-        title="Keep JournalMe current."
-        description="Sync execution history without rebuilding your journal workflow every time you trade."
-        action={<Link className="button" href="/imports">Import history</Link>}
+        title="One ingestion layer, multiple ways to sync"
+        description="NinjaTrader can become the live desktop path, Tradovate can provide catch-up, and CSV remains the recovery path. All connectors feed the same JournalMe history."
+        action={account ? <button className="button primary" type="button" disabled={creating} onClick={() => void createNinjaTraderSlot()}>{creating ? "Creating…" : "Add NinjaTrader probe"}</button> : undefined}
       />
       {error && <ErrorState message={error} />}
-
-      <section className="broker-connection-grid">
-        <article className="card broker-connection-card featured">
-          <div className="broker-card-head">
-            <div>
-              <span className="broker-provider-mark">TV</span>
-              <div>
-                <p className="eyebrow">Tradovate</p>
-                <h2>Report Sync</h2>
-              </div>
-            </div>
-            <span className="connection-badge ready">Ready</span>
-          </div>
-
-          <p className="broker-copy">
-            Your Lucid/Tradovate account does not need API credentials for this mode. Download the latest reports, press Sync now, and JournalMe recognizes, deduplicates, and commits them automatically.
-          </p>
-
-          <div className="broker-sync-requirements">
-            <div><strong>Core</strong><span>Performance + Fills</span></div>
-            <div><strong>Recommended</strong><span>Account Balance History</span></div>
-            <div><strong>Optional</strong><span>Orders, Cash History, Position History</span></div>
-          </div>
-
-          <div className="broker-status-strip">
-            <div>
-              <span>Account</span>
-              <strong>{account?.name ?? "Choose or create a JournalMe account"}</strong>
-            </div>
-            <div>
-              <span>Last synced</span>
-              <strong>{lastSync?.committed_at ? dateTime(lastSync.committed_at) : "Not synced yet"}</strong>
-            </div>
-            <div>
-              <span>Connection</span>
-              <strong>Secure report import</strong>
-            </div>
-          </div>
-
-          {result && (
-            <div className="broker-sync-result" role="status">
-              <strong>Sync complete</strong>
-              <span>{syncSummary(result)}</span>
-              {!tradovateHasBalanceReport(result.preview) && (
-                <small>Trades are current. Add Account Balance History next time if you want the broker balance snapshot refreshed too.</small>
-              )}
+      <section className="connector-principles">
+        <article className="card"><span>Live</span><h2>NinjaTrader bridge</h2><p>Read-only execution and account events while NinjaTrader is running.</p></article>
+        <article className="card"><span>Catch-up</span><h2>Tradovate</h2><p>Browser-session or report-assisted recovery for periods where the desktop bridge was unavailable.</p></article>
+        <article className="card"><span>Fallback</span><h2>File import</h2><p>The existing importer remains the auditable historical and disaster-recovery path.</p></article>
+      </section>
+      {loading ? <Skeleton rows={4} /> : (
+        <section className="card broker-connections-card">
+          <div className="section-title"><div><p className="eyebrow">Registered connectors</p><h2>{connections.length ? `${connections.length} connection${connections.length === 1 ? "" : "s"}` : "No connectors registered yet"}</h2></div></div>
+          {!connections.length ? <p className="muted">Create a NinjaTrader probe slot for the selected account. The first bridge build will attach to this record without changing or placing any orders.</p> : (
+            <div className="broker-connection-list">
+              {connections.map((item) => {
+                const linked = accounts.find((candidate) => candidate.id === item.account_id);
+                return (
+                  <article key={item.id}>
+                    <div><strong>{item.display_name}</strong><span>{item.provider} · {item.connection_type.replaceAll("_", " ")}</span></div>
+                    <div><span className={`connection-state ${item.status}`}>{item.status}</span><small>{linked?.name ?? "Unmapped account"}</small></div>
+                    <div><span>Last seen</span><small>{timeLabel(item.last_seen_at)}</small></div>
+                    <div><span>Last sync</span><small>{timeLabel(item.last_sync_at)}</small></div>
+                  </article>
+                );
+              })}
             </div>
           )}
-
-          <div className="broker-actions">
-            <button className="button primary" type="button" disabled={busy} onClick={() => picker.current?.click()}>
-              {busy ? "Syncing…" : "Sync now"}
-            </button>
-            <Link className="button" href="/import">Use full import review</Link>
-          </div>
-          <input
-            ref={picker}
-            type="file"
-            accept=".csv,text/csv"
-            multiple
-            hidden
-            onChange={(event) => void choose(event.target.files)}
-          />
-          <small className="broker-security-note">JournalMe never asks for or stores your Tradovate password in Report Sync mode.</small>
-        </article>
-
-        <article className="card broker-connection-card">
-          <div className="broker-card-head">
-            <div>
-              <span className="broker-provider-mark muted-mark">API</span>
-              <div>
-                <p className="eyebrow">Future connector</p>
-                <h2>Official API Sync</h2>
-              </div>
-            </div>
-            <span className="connection-badge">Not configured</span>
-          </div>
-          <p className="broker-copy">If a broker account provides official API or OAuth access, JournalMe can use the same normalized trade pipeline for one-click or automatic synchronization.</p>
-          <div className="broker-roadmap">
-            <span>Connect once</span><span>Sync new fills</span><span>Deduplicate</span><span>Update JournalMe</span>
-          </div>
-        </article>
-      </section>
-    </>
+        </section>
+      )}
+    </div>
   );
 }
