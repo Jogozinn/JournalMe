@@ -185,7 +185,7 @@ def rank_candidates(db: Session, capture: CaptureEvent, user_id: UUID) -> list[M
 
 
 def _companion_attachment_name(capture: CaptureEvent) -> str:
-    suffix = Path(capture.screenshot_original_filename).suffix.lower()
+    suffix = Path(capture.screenshot_original_filename or "capture.png").suffix.lower()
     if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
         suffix = ".png"
     return f"companion-{capture.id}{suffix}"

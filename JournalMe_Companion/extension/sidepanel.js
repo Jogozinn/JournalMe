@@ -22,8 +22,9 @@ const DEFAULT_TAGS = {
   ]
 };
 
-let eventType = "entry";
 let pendingCapture = null;
+let activeEpisode = null;
+let chosenPhase = null;
 let customTags = { setup: [], execution: [], emotion: [] };
 let lastSavedRoute = null;
 let connection = null;
@@ -34,13 +35,12 @@ const selected = {
 };
 
 const $ = (id) => document.getElementById(id);
-const sidePanelPort = chrome.runtime.connect({ name: "journalme-sidepanel" });
-
+chrome.runtime.connect({ name: "journalme-sidepanel" });
 
 function uniqueTags(values) {
   const seen = new Set();
   return values.filter((value) => {
-    const key = value.trim().toLowerCase();
+    const key = String(value || "").trim().toLowerCase();
     if (!key || seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -49,9 +49,8 @@ function uniqueTags(values) {
 
 function renderChips(containerId, group) {
   const container = $(containerId);
-  const defaults = DEFAULT_TAGS[group];
   const customs = customTags[group] || [];
-  const tags = uniqueTags([...defaults, ...customs]);
+  const tags = uniqueTags([...(DEFAULT_TAGS[group] || []), ...customs]);
   container.innerHTML = "";
   for (const tag of tags) {
     const button = document.createElement("button");
@@ -60,13 +59,9 @@ function renderChips(containerId, group) {
     button.textContent = tag;
     if (selected[group].has(tag)) button.classList.add("selected");
     button.addEventListener("click", () => {
-      if (selected[group].has(tag)) {
-        selected[group].delete(tag);
-        button.classList.remove("selected");
-      } else {
-        selected[group].add(tag);
-        button.classList.add("selected");
-      }
+      if (selected[group].has(tag)) selected[group].delete(tag);
+      else selected[group].add(tag);
+      renderChips(containerId, group);
     });
     container.appendChild(button);
   }
@@ -111,10 +106,22 @@ function setStatus(message, type = "") {
   el.className = `status ${type}`.trim();
 }
 
-function formatCapturedAt(iso) {
+function formatTime(iso) {
   if (!iso) return "";
   const d = new Date(iso);
-  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return Number.isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function formatDateTime(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function phaseLabel(value) {
+  if (!value) return "Moment";
+  return String(value).replaceAll("_", " ");
 }
 
 function renderPending() {
@@ -122,8 +129,9 @@ function renderPending() {
   const empty = $("emptyPreview");
   if (!pendingCapture?.screenshotDataUrl) {
     preview.style.display = "none";
+    preview.removeAttribute("src");
     empty.style.display = "grid";
-    $("platform").textContent = "No capture";
+    $("platform").textContent = "No screenshot attached";
     $("capturedAt").textContent = "";
     return;
   }
@@ -131,10 +139,8 @@ function renderPending() {
   preview.style.display = "block";
   empty.style.display = "none";
   $("platform").textContent = pendingCapture.platform || "Browser";
-  $("capturedAt").textContent = formatCapturedAt(pendingCapture.capturedAt);
-  if (!$("symbol").value && pendingCapture.detectedSymbol) {
-    $("symbol").value = pendingCapture.detectedSymbol;
-  }
+  $("capturedAt").textContent = formatTime(pendingCapture.capturedAt);
+  if (!$("symbol").value && pendingCapture.detectedSymbol) $("symbol").value = pendingCapture.detectedSymbol;
 }
 
 async function loadPending() {
@@ -158,45 +164,41 @@ async function loadConnection() {
   const dot = $("connectionDot");
   const title = $("connectionTitle");
   const detail = $("connectionDetail");
-  const authCard = $("authCard");
-  const signOutBtn = $("signOutBtn");
-  const brokerSyncCard = $("brokerSyncCard");
   dot.className = "connection-dot";
   if (result?.ok && result.mode === "hosted") {
     dot.classList.add("connected");
     title.textContent = "Signed in to JournalMe";
     detail.textContent = result.userEmail || "Cloud account connected";
-    authCard.hidden = true;
-    signOutBtn.hidden = false;
-    brokerSyncCard.hidden = false;
+    $("authCard").hidden = true;
+    $("signOutBtn").hidden = false;
+    $("brokerSyncCard").hidden = false;
     return result;
   }
   if (result?.mode === "hosted") {
     dot.classList.add("warning");
     title.textContent = "Sign in to sync";
-    detail.textContent = "Your captures can sync without the website being open";
-    authCard.hidden = false;
-    signOutBtn.hidden = true;
-    brokerSyncCard.hidden = true;
+    detail.textContent = "Your moments can sync without the website being open";
+    $("authCard").hidden = false;
+    $("signOutBtn").hidden = true;
+    $("brokerSyncCard").hidden = true;
     return result;
   }
   dot.classList.add("local");
   title.textContent = "Local development mode";
   detail.textContent = "Saving to the configured local JournalMe API";
-  authCard.hidden = true;
-  signOutBtn.hidden = true;
-  brokerSyncCard.hidden = false;
+  $("authCard").hidden = true;
+  $("signOutBtn").hidden = true;
+  $("brokerSyncCard").hidden = false;
   return result;
 }
 
-
 async function dataUrlToBlob(dataUrl) {
   const response = await fetch(dataUrl);
-  return await response.blob();
+  return response.blob();
 }
 
 async function journalFetch(path, options = {}) {
-  const context = await authContext();
+  const context = connection?.ok ? connection : await authContext();
   if (!context?.ok) throw new Error(context?.error || "JournalMe Companion is not connected.");
   const headers = new Headers(options.headers || {});
   for (const [key, value] of Object.entries(context.headers || {})) headers.set(key, value);
@@ -213,8 +215,7 @@ function apiDetailMessage(payload, fallback) {
     if (Array.isArray(detail.errors)) {
       for (const issue of detail.errors) {
         if (!issue || typeof issue !== "object") continue;
-        const prefix = issue.filename ? `${issue.filename}: ` : "";
-        parts.push(`${prefix}${issue.reason || "Invalid report data."}`);
+        parts.push(`${issue.filename ? `${issue.filename}: ` : ""}${issue.reason || "Invalid report data."}`);
       }
     }
     if (parts.length) return parts.join(" ");
@@ -232,11 +233,7 @@ function quickSyncMissing(preview) {
 
 async function cancelImportQuietly(sessionId) {
   if (!sessionId) return;
-  try {
-    await journalFetch(`/api/v1/imports/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" });
-  } catch {
-    // The preview remains visible in Import history if cancellation itself fails.
-  }
+  try { await journalFetch(`/api/v1/imports/${encodeURIComponent(sessionId)}/cancel`, { method: "POST" }); } catch {}
 }
 
 async function syncTradovateReports(files) {
@@ -254,10 +251,7 @@ async function syncTradovateReports(files) {
     const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : "";
     const previewResponse = await journalFetch(`/api/v1/imports/preview${query}`, { method: "POST", body: form });
     const preview = await previewResponse.json().catch(() => ({}));
-    if (!previewResponse.ok) {
-      throw new Error(apiDetailMessage(preview, `Preview failed (${previewResponse.status}).`));
-    }
-
+    if (!previewResponse.ok) throw new Error(apiDetailMessage(preview, `Preview failed (${previewResponse.status}).`));
     const missing = quickSyncMissing(preview);
     if (missing.length) {
       await cancelImportQuietly(preview.session_id);
@@ -268,13 +262,10 @@ async function syncTradovateReports(files) {
       const first = preview.errors[0];
       throw new Error(`${first?.filename || "A report"}: ${first?.reason || "validation failed"}`);
     }
-
     statusBox.textContent = "Reports recognized. Updating JournalMe...";
     const commitResponse = await journalFetch(`/api/v1/imports/${encodeURIComponent(preview.session_id)}/commit`, { method: "POST" });
     const commit = await commitResponse.json().catch(() => ({}));
-    if (!commitResponse.ok) {
-      throw new Error(apiDetailMessage(commit, `Sync failed (${commitResponse.status}).`));
-    }
+    if (!commitResponse.ok) throw new Error(apiDetailMessage(commit, `Sync failed (${commitResponse.status}).`));
     const created = commit.created || {};
     const balanceNote = (preview.reports || []).some((report) => report.type === "account_balance_history")
       ? ` · ${Number(created.daily_balances || 0)} balance snapshot${Number(created.daily_balances || 0) === 1 ? "" : "s"}`
@@ -282,7 +273,7 @@ async function syncTradovateReports(files) {
     statusBox.className = "status ok";
     statusBox.textContent = `${Number(created.trades || 0)} new trade${Number(created.trades || 0) === 1 ? "" : "s"} · ${Number(created.fills || 0)} fills${balanceNote}`;
     await loadAccounts();
-    await reconcileAndLoadRecent();
+    await reconcileAndLoadEpisodes();
   } catch (error) {
     statusBox.className = "status error";
     statusBox.textContent = error?.message || String(error);
@@ -298,22 +289,12 @@ async function ensureCapturePermission() {
   const tab = tabs[0];
   if (!tab?.url) return true;
   let url;
-  try {
-    url = new URL(tab.url);
-  } catch {
-    return true;
-  }
-  if (!/^https?:$/.test(url.protocol)) {
-    throw new Error("Open a normal web page before taking a screenshot.");
-  }
+  try { url = new URL(tab.url); } catch { return true; }
+  if (!/^https?:$/.test(url.protocol)) throw new Error("Open a normal web page before taking a screenshot.");
   const originPattern = `${url.origin}/*`;
-  const hasAccess = await chrome.permissions.contains({ origins: [originPattern] });
-  if (hasAccess) return true;
-
+  if (await chrome.permissions.contains({ origins: [originPattern] })) return true;
   const granted = await chrome.permissions.request({ origins: [originPattern] });
-  if (!granted) {
-    throw new Error(`Allow JournalMe access to ${url.hostname} so the Take screenshot button can capture this page. Alt+C still works without permanent site access.`);
-  }
+  if (!granted) throw new Error(`Allow JournalMe access to ${url.hostname} so the Take screenshot button can capture this page. Alt+C still works without permanent site access.`);
   return true;
 }
 
@@ -323,13 +304,10 @@ async function captureNow() {
     $("captureBtn").disabled = true;
     await ensureCapturePermission();
     const response = await chrome.runtime.sendMessage({ type: "CAPTURE_NOW" });
-    if (!response?.ok) {
-      setStatus(response?.error || "Capture failed.", "error");
-      return;
-    }
+    if (!response?.ok) throw new Error(response?.error || "Capture failed.");
     pendingCapture = response.pending;
     renderPending();
-    setStatus("Screenshot ready.", "ok");
+    setStatus("Screenshot ready. Add a thought if useful, then save.", "ok");
   } catch (error) {
     setStatus(error?.message || String(error), "error");
   } finally {
@@ -337,75 +315,88 @@ async function captureNow() {
   }
 }
 
-
 async function clearPending() {
   pendingCapture = null;
   await chrome.storage.local.remove("pendingCapture");
   renderPending();
-  setStatus("Pending capture cleared.");
+  setStatus("Pending screenshot cleared.");
 }
 
-function buildMetadata() {
-  if (!pendingCapture) throw new Error("Take a screenshot first.");
-  const symbol = $("symbol").value.trim().toUpperCase();
-  if (!symbol && eventType !== "wait") throw new Error("Add a symbol before saving.");
+function setPhase(value) {
+  chosenPhase = chosenPhase === value ? null : value;
+  document.querySelectorAll(".phase").forEach((button) => {
+    button.classList.toggle("selected", button.dataset.phase === chosenPhase);
+  });
+}
+
+function clearMomentForm() {
+  $("note").value = "";
+  chosenPhase = null;
+  document.querySelectorAll(".phase").forEach((button) => button.classList.remove("selected"));
+  selected.setup.clear();
+  selected.execution.clear();
+  selected.emotion.clear();
+  renderAllTags();
+}
+
+function momentMetadata() {
+  const capturedAt = pendingCapture?.capturedAt || new Date().toISOString();
+  const ageMs = Math.abs(Date.now() - new Date(capturedAt).getTime());
   return {
-    captured_at: pendingCapture.capturedAt,
-    event_type: eventType,
-    account_id: $("account").value || null,
-    symbol: symbol || null,
-    side: $("side").value || null,
+    episode_id: activeEpisode?.id || null,
+    captured_at: capturedAt,
+    phase: chosenPhase,
+    account_id: $("account").value || activeEpisode?.account_id || null,
+    symbol: $("symbol").value.trim().toUpperCase() || activeEpisode?.symbol || null,
+    side: $("side").value || activeEpisode?.side || null,
     note: $("note").value.trim() || null,
     setup_tags: [...selected.setup],
     execution_tags: [...selected.execution],
     emotion_tags: [...selected.emotion],
-    platform: pendingCapture.platform || null,
-    page_url: pendingCapture.pageUrl || null,
-    page_title: pendingCapture.pageTitle || null,
+    platform: pendingCapture?.platform || "Chrome Companion",
+    page_url: pendingCapture?.pageUrl || null,
+    page_title: pendingCapture?.pageTitle || null,
     source: "journalme_chrome_extension",
-    match_status: "unmatched",
-    matched_trade_id: null
+    recorded_live: Number.isFinite(ageMs) ? ageMs <= 15 * 60 * 1000 : true,
   };
 }
 
-async function routeCapture(captureId, activate = false) {
-  lastSavedRoute = `/captures?selected=${encodeURIComponent(captureId)}`;
-  $("openSavedBtn").hidden = false;
-  return chrome.runtime.sendMessage({ type: "ROUTE_APP", path: lastSavedRoute, activate });
+function hasMomentContent(metadata) {
+  return Boolean(
+    pendingCapture?.screenshotDataUrl || metadata.note ||
+    metadata.setup_tags.length || metadata.execution_tags.length || metadata.emotion_tags.length
+  );
 }
 
-async function saveCapture() {
+async function saveMoment() {
   try {
     setStatus("Saving...");
     $("saveBtn").disabled = true;
     $("openSavedBtn").hidden = true;
-    const metadata = buildMetadata();
-    const screenshotBlob = await dataUrlToBlob(pendingCapture.screenshotDataUrl);
+    const metadata = momentMetadata();
+    if (!hasMomentContent(metadata)) throw new Error("Add a thought, screenshot, or optional context before saving.");
     const form = new FormData();
     form.append("metadata", JSON.stringify(metadata));
-    form.append("screenshot", screenshotBlob, `journalme-${Date.now()}.png`);
-    const response = await journalFetch("/api/v1/captures", { method: "POST", body: form });
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(body?.detail || body?.message || `Save failed (${response.status}).`);
-
-    if (body?.match_status === "matched") setStatus("Saved and matched to the trade.", "ok");
-    else if (body?.match_status === "suggested") setStatus("Saved. JournalMe found a possible trade match.", "ok");
-    else setStatus("Saved to JournalMe.", "ok");
-
-    await chrome.storage.local.remove("pendingCapture");
-    pendingCapture = null;
-    $("note").value = "";
-    selected.setup.clear();
-    selected.execution.clear();
-    selected.emotion.clear();
-    renderAllTags();
-    renderPending();
-    await loadRecent();
-
-    const context = connection || await authContext();
-    if (body?.id && context?.settings?.autoRouteAfterSave !== false) {
-      await routeCapture(body.id, false);
+    if (pendingCapture?.screenshotDataUrl) {
+      const blob = await dataUrlToBlob(pendingCapture.screenshotDataUrl);
+      form.append("screenshot", blob, `journalme-${Date.now()}.png`);
     }
+    const response = await journalFetch("/api/v1/captures/moments", { method: "POST", body: form });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiDetailMessage(body, `Save failed (${response.status}).`));
+
+    activeEpisode = body?.episode?.status === "active" ? body.episode : null;
+    const statusText = body?.episode?.status === "active" ? "Moment saved to the active episode." : "Moment saved. Episode complete.";
+    setStatus(statusText, "ok");
+    lastSavedRoute = "/companion";
+    $("openSavedBtn").hidden = false;
+
+    if (pendingCapture) await chrome.storage.local.remove("pendingCapture");
+    pendingCapture = null;
+    clearMomentForm();
+    renderPending();
+    renderActiveEpisode();
+    await loadEpisodes();
   } catch (error) {
     setStatus(error?.message || String(error), "error");
   } finally {
@@ -419,7 +410,7 @@ async function loadAccounts() {
   const stored = await chrome.storage.local.get("companionAccountId");
   const wanted = stored.companionAccountId || "";
   try {
-    const context = connection || await authContext();
+    const context = connection?.ok ? connection : await authContext();
     if (!context?.ok) {
       select.innerHTML = '<option value="">Sign in first</option>';
       select.disabled = true;
@@ -439,107 +430,162 @@ async function loadAccounts() {
     }
     if (wanted && [...select.options].some((option) => option.value === wanted)) select.value = wanted;
     else if (accounts?.length === 1) select.value = accounts[0].id;
-    if (!accounts?.length) {
-      select.innerHTML = '<option value="">No trading accounts yet</option>';
-      hint.textContent = "Captures still sync to your journal. Create an account in JournalMe when you are ready.";
-    } else {
-      hint.textContent = `${accounts.length} JournalMe account${accounts.length === 1 ? "" : "s"} available.`;
-    }
+    hint.textContent = accounts?.length ? `${accounts.length} JournalMe account${accounts.length === 1 ? "" : "s"} available.` : "Create a trading account in JournalMe when you are ready.";
   } catch (error) {
-    console.warn("JournalMe account load failed", error);
     select.innerHTML = '<option value="">Account list unavailable</option>';
     select.disabled = true;
     hint.textContent = error?.message || "Could not load accounts.";
   }
 }
 
-
-async function removeRecentCapture(item) {
-  if (!confirm(`Remove ${item.symbol || "this"} capture? This removes only the Companion capture and screenshot, not the trade or journal.`)) return;
-  try {
-    const response = await journalFetch(`/api/v1/captures/${item.id}`, { method: "DELETE" });
-    if (!response.ok) throw new Error(`API ${response.status}`);
-    setStatus("Capture removed.", "ok");
-    await loadRecent();
-  } catch (error) {
-    console.error("JournalMe remove capture failed:", error);
-    setStatus(error?.message || "Capture could not be removed.", "error");
+function renderActiveEpisode() {
+  const card = $("activeEpisodeCard");
+  if (!activeEpisode) {
+    card.hidden = true;
+    $("activeTimeline").innerHTML = "";
+    return;
+  }
+  card.hidden = false;
+  const title = [activeEpisode.symbol || "Trading observation", activeEpisode.side ? activeEpisode.side.toUpperCase() : null].filter(Boolean).join(" · ");
+  $("activeEpisodeTitle").textContent = title;
+  $("activeEpisodeMeta").textContent = `Started ${formatDateTime(activeEpisode.started_at)} · ${activeEpisode.moment_count || 0} ${(activeEpisode.moment_count || 0) === 1 ? "moment" : "moments"}`;
+  if (!$("symbol").value && activeEpisode.symbol) $("symbol").value = activeEpisode.symbol;
+  if (!$("side").value && activeEpisode.side) $("side").value = activeEpisode.side;
+  const timeline = $("activeTimeline");
+  timeline.innerHTML = "";
+  const moments = activeEpisode.moments || [];
+  if (!moments.length) {
+    timeline.innerHTML = '<div class="muted">Your first saved moment will appear here.</div>';
+    return;
+  }
+  for (const moment of moments.slice(-6)) {
+    const row = document.createElement("div");
+    row.className = "timeline-item";
+    const time = document.createElement("div");
+    time.className = "timeline-time";
+    time.textContent = formatTime(moment.captured_at);
+    const copy = document.createElement("div");
+    copy.className = "timeline-copy";
+    const label = document.createElement("strong");
+    label.textContent = phaseLabel(moment.phase);
+    copy.appendChild(label);
+    if (moment.note) {
+      const note = document.createElement("p");
+      note.textContent = moment.note;
+      copy.appendChild(note);
+    }
+    const details = [];
+    if (moment.has_screenshot) details.push("screenshot");
+    if (moment.recorded_live === false) details.push("added later");
+    if (details.length) {
+      const meta = document.createElement("span");
+      meta.textContent = details.join(" · ");
+      copy.appendChild(meta);
+    }
+    row.append(time, copy);
+    timeline.appendChild(row);
   }
 }
 
-async function loadRecent() {
+function renderRecentEpisodes(items) {
   const recent = $("recent");
-  try {
-    const response = await journalFetch("/api/v1/captures?limit=8");
-    if (!response.ok) throw new Error(`API ${response.status}`);
-    const items = await response.json();
-    if (!Array.isArray(items) || !items.length) {
-      recent.innerHTML = '<div class="muted">No captures yet.</div>';
-      return;
+  if (!Array.isArray(items) || !items.length) {
+    recent.innerHTML = '<div class="muted">No episode-based activity yet. Your older single captures are still in JournalMe → Captures and are included in the WaveRR research export.</div>';
+    return;
+  }
+  recent.innerHTML = "";
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "recent-item";
+    button.addEventListener("click", () => chrome.runtime.sendMessage({ type: "ROUTE_APP", path: "/companion", activate: true }));
+    const main = document.createElement("div");
+    main.className = "recent-main";
+    const title = document.createElement("strong");
+    title.textContent = `${item.symbol || "Observation"}${item.side ? ` · ${item.side.toUpperCase()}` : ""}`;
+    const status = document.createElement("em");
+    status.textContent = item.status || "complete";
+    main.append(title, status);
+    const meta = document.createElement("div");
+    meta.className = "recent-meta";
+    meta.textContent = `${item.moment_count || 0} ${(item.moment_count || 0) === 1 ? "moment" : "moments"} · ${item.screenshot_count || 0} ${(item.screenshot_count || 0) === 1 ? "screenshot" : "screenshots"} · ${formatDateTime(item.started_at)}`;
+    button.append(main, meta);
+    if (item.matched_trade) {
+      const pnl = document.createElement("div");
+      const numeric = Number(item.matched_trade.net_pnl || 0);
+      pnl.className = `recent-pnl ${numeric >= 0 ? "positive" : "negative"}`;
+      pnl.textContent = `Matched trade · ${numeric >= 0 ? "+" : ""}$${numeric.toFixed(2)}`;
+      button.appendChild(pnl);
     }
-    recent.innerHTML = "";
-    for (const item of items) {
-      const wrap = document.createElement("div");
-      wrap.className = "recent-item";
-
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "recent-open";
-      open.addEventListener("click", () => routeCapture(item.id, true));
-
-      const main = document.createElement("div");
-      main.className = "recent-main";
-      const left = document.createElement("span");
-      left.textContent = `${item.symbol || "WAIT"} · ${(item.event_type || "").toUpperCase()}`;
-      const right = document.createElement("span");
-      right.textContent = formatCapturedAt(item.captured_at || item.created_at);
-      main.append(left, right);
+    if (item.last_note) {
       const note = document.createElement("div");
       note.className = "recent-note";
-      const matchLabel = item.match_status === "matched" ? "MATCHED" : item.match_status === "suggested" ? "POSSIBLE MATCH" : "UNMATCHED";
-      note.textContent = `${matchLabel} · ${item.note || item.platform || "Saved capture"}`;
-      open.append(main, note);
-
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "recent-remove";
-      remove.title = "Remove capture";
-      remove.setAttribute("aria-label", `Remove ${item.symbol || "capture"}`);
-      remove.textContent = "×";
-      remove.addEventListener("click", (event) => {
-        event.stopPropagation();
-        void removeRecentCapture(item);
-      });
-
-      wrap.append(open, remove);
-      recent.appendChild(wrap);
+      note.textContent = item.last_note;
+      button.appendChild(note);
     }
-  } catch (error) {
-    console.error("JournalMe loadRecent failed:", error);
-    recent.innerHTML = `<div class="muted">${error?.message || "Connection unavailable"}</div>`;
+    recent.appendChild(button);
   }
 }
 
-async function reconcileAndLoadRecent() {
+async function loadEpisodes() {
   try {
-    await journalFetch("/api/v1/captures/reconcile", { method: "POST" });
+    const accountId = $("account").value || "";
+    const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : "";
+    const recentQuery = accountId ? `?account_id=${encodeURIComponent(accountId)}&limit=8` : "?limit=8";
+    const [activeResponse, recentResponse] = await Promise.all([
+      journalFetch(`/api/v1/captures/episodes/active${query}`),
+      journalFetch(`/api/v1/captures/episodes${recentQuery}`),
+    ]);
+    if (!activeResponse.ok) throw new Error(`Active episode API ${activeResponse.status}`);
+    if (!recentResponse.ok) throw new Error(`Recent episodes API ${recentResponse.status}`);
+    activeEpisode = await activeResponse.json();
+    renderActiveEpisode();
+    renderRecentEpisodes(await recentResponse.json());
+  } catch (error) {
+    console.error("JournalMe episode load failed:", error);
+    $("recent").innerHTML = `<div class="muted">${error?.message || "Connection unavailable"}</div>`;
+  }
+}
+
+async function reconcileAndLoadEpisodes() {
+  try {
+    const accountId = $("account").value || "";
+    const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : "";
+    await journalFetch(`/api/v1/captures/reconcile${query}`, { method: "POST" });
   } catch (error) {
     console.warn("JournalMe reconciliation request failed:", error);
   }
-  await loadRecent();
+  await loadEpisodes();
+}
+
+async function endEpisode() {
+  if (!activeEpisode?.id) return;
+  try {
+    $("endEpisodeBtn").disabled = true;
+    const response = await journalFetch(`/api/v1/captures/episodes/${encodeURIComponent(activeEpisode.id)}/complete`, { method: "POST" });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(apiDetailMessage(body, `Could not end episode (${response.status}).`));
+    activeEpisode = null;
+    renderActiveEpisode();
+    setStatus("Episode ended. Your next saved moment can start a new one.", "ok");
+    await loadEpisodes();
+  } catch (error) {
+    setStatus(error?.message || String(error), "error");
+  } finally {
+    $("endEpisodeBtn").disabled = false;
+  }
 }
 
 async function openJournalMe() {
-  await chrome.runtime.sendMessage({ type: "ROUTE_APP", path: "/captures", activate: true });
+  await chrome.runtime.sendMessage({ type: "ROUTE_APP", path: "/companion", activate: true });
 }
 
 async function signInHosted() {
   const email = $("authEmail").value.trim();
   const password = $("authPassword").value;
-  const errorBox = $("authError");
-  errorBox.textContent = "";
+  $("authError").textContent = "";
   if (!email || !password) {
-    errorBox.textContent = "Enter your email and password.";
+    $("authError").textContent = "Enter your email and password.";
     return;
   }
   $("signInBtn").disabled = true;
@@ -551,9 +597,9 @@ async function signInHosted() {
     setStatus("Signed in. Companion sync is ready.", "ok");
     await loadConnection();
     await loadAccounts();
-    await reconcileAndLoadRecent();
+    await reconcileAndLoadEpisodes();
   } catch (error) {
-    errorBox.textContent = error?.message || String(error);
+    $("authError").textContent = error?.message || String(error);
   } finally {
     $("signInBtn").disabled = false;
     $("signInBtn").textContent = "Sign in";
@@ -563,52 +609,49 @@ async function signInHosted() {
 async function signOutHosted() {
   await chrome.runtime.sendMessage({ type: "SIGN_OUT_HOSTED" });
   connection = null;
+  activeEpisode = null;
+  renderActiveEpisode();
   setStatus("Signed out of JournalMe Companion.");
   await loadConnection();
   await loadAccounts();
-  $("recent").innerHTML = '<div class="muted">Sign in to load your captures.</div>';
+  $("recent").innerHTML = '<div class="muted">Sign in to load your episodes.</div>';
 }
 
 async function openAuthRoute(path) {
   await chrome.runtime.sendMessage({ type: "ROUTE_APP", path, activate: true });
 }
 
-
-document.querySelectorAll(".seg").forEach(button => {
-  button.addEventListener("click", () => {
-    document.querySelectorAll(".seg").forEach(el => el.classList.remove("active"));
-    button.classList.add("active");
-    eventType = button.dataset.event;
-  });
-});
-
-const customBindings = [
+document.querySelectorAll(".phase").forEach((button) => button.addEventListener("click", () => setPhase(button.dataset.phase)));
+for (const [buttonId, inputId, group] of [
   ["addSetupCustom", "setupCustom", "setup"],
   ["addExecutionCustom", "executionCustom", "execution"],
   ["addEmotionCustom", "emotionCustom", "emotion"],
-];
-for (const [buttonId, inputId, group] of customBindings) {
+]) {
   $(buttonId).addEventListener("click", () => addCustomTag(group, inputId));
   $(inputId).addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      addCustomTag(group, inputId);
+      void addCustomTag(group, inputId);
     }
   });
 }
 
-$("account").addEventListener("change", () => chrome.storage.local.set({ companionAccountId: $("account").value || null }));
+$("account").addEventListener("change", async () => {
+  await chrome.storage.local.set({ companionAccountId: $("account").value || null });
+  activeEpisode = null;
+  renderActiveEpisode();
+  await loadEpisodes();
+});
 $("brokerSyncBtn").addEventListener("click", () => $("brokerFiles").click());
 $("brokerFiles").addEventListener("change", (event) => void syncTradovateReports(event.target.files));
 $("captureBtn").addEventListener("click", captureNow);
-$("saveBtn").addEventListener("click", saveCapture);
+$("saveBtn").addEventListener("click", saveMoment);
 $("clearBtn").addEventListener("click", clearPending);
-$("refreshBtn").addEventListener("click", reconcileAndLoadRecent);
+$("refreshBtn").addEventListener("click", reconcileAndLoadEpisodes);
+$("endEpisodeBtn").addEventListener("click", endEpisode);
 $("openJournalBtn").addEventListener("click", openJournalMe);
 $("signInBtn").addEventListener("click", signInHosted);
-$("authPassword").addEventListener("keydown", (event) => {
-  if (event.key === "Enter") void signInHosted();
-});
+$("authPassword").addEventListener("keydown", (event) => { if (event.key === "Enter") void signInHosted(); });
 $("signOutBtn").addEventListener("click", signOutHosted);
 $("registerBtn").addEventListener("click", () => openAuthRoute("/register"));
 $("forgotBtn").addEventListener("click", () => openAuthRoute("/forgot-password"));
@@ -616,11 +659,15 @@ $("openSavedBtn").addEventListener("click", () => lastSavedRoute && chrome.runti
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
+  if (changes.pendingCapture) {
+    pendingCapture = changes.pendingCapture.newValue || null;
+    renderPending();
+  }
   if (changes.companionAuth || changes.settings) {
     void loadConnection().then(async (result) => {
       await loadAccounts();
-      if (result?.ok) await reconcileAndLoadRecent();
-      else $("recent").innerHTML = '<div class="muted">Sign in to load your captures.</div>';
+      if (result?.ok) await reconcileAndLoadEpisodes();
+      else $("recent").innerHTML = '<div class="muted">Sign in to load your episodes.</div>';
     });
   }
 });
@@ -630,6 +677,6 @@ chrome.storage.onChanged.addListener((changes, area) => {
   await loadPending();
   const result = await loadConnection();
   await loadAccounts();
-  if (result?.ok) await reconcileAndLoadRecent();
-  else $("recent").innerHTML = '<div class="muted">Sign in to load your captures.</div>';
+  if (result?.ok) await reconcileAndLoadEpisodes();
+  else $("recent").innerHTML = '<div class="muted">Sign in to load your episodes.</div>';
 })();

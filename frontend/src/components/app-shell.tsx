@@ -18,6 +18,7 @@ const nav: { href: string; label: string; icon: IconName }[] = [
   { href: "/days", label: "Trading Days", icon: "days" },
   { href: "/trades", label: "Trades", icon: "trades" },
   { href: "/captures", label: "Captures", icon: "capture" },
+  { href: "/companion", label: "Companion", icon: "capture" },
   { href: "/calendar", label: "Calendar", icon: "calendar" },
   { href: "/analytics", label: "Analytics", icon: "analytics" },
   { href: "/intelligence", label: "Intelligence", icon: "intelligence" },
@@ -42,6 +43,7 @@ const PROTECTED_PREFIXES = [
   "/days",
   "/trades",
   "/captures",
+  "/companion",
   "/calendar",
   "/analytics",
   "/intelligence",
@@ -271,8 +273,8 @@ function ShellContent({ children }: { children: React.ReactNode }) {
             <span>{item.label}</span>
           </Link>
         ))}
-        <Link href="/import" className="import-action" aria-label="Import trading data">
-          <Icon name="import" />
+        <Link href="/companion" className="import-action" aria-label="Open Companion mode" title="Companion">
+          <Icon name="capture" />
         </Link>
         <Link href="/calendar" className={routeMatches(activePath, "/calendar") ? "active" : ""}>
           <Icon name="calendar" />

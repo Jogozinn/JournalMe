@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "JournalMe Companion",
-  "version": "0.7.0",
-  "description": "Capture a chart with one shortcut or one button and save it to your JournalMe account.",
+  "version": "0.8.0",
+  "description": "Capture live trading thoughts, screenshots, and optional timeline updates directly into JournalMe.",
   "permissions": [
     "activeTab",
     "tabs",

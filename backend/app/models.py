@@ -542,6 +542,41 @@ class Attachment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class TradingEpisode(Base):
+    __tablename__ = "trading_episodes"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    account_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("trading_accounts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    matched_trade_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("trades.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    symbol: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    side: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="active", index=True)
+    source: Mapped[str] = mapped_column(String(80), default="journalme_companion")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    moments: Mapped[list[CaptureEvent]] = relationship(
+        back_populates="episode", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("ix_trading_episodes_user_started", "user_id", "started_at"),
+        Index("ix_trading_episodes_user_status", "user_id", "status"),
+    )
+
+
 class CaptureEvent(Base):
     __tablename__ = "capture_events"
 
@@ -552,9 +587,14 @@ class CaptureEvent(Base):
     account_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("trading_accounts.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    episode_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("trading_episodes.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     event_type: Mapped[str] = mapped_column(String(20), index=True)
+    phase: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+    recorded_live: Mapped[bool] = mapped_column(Boolean, default=True)
     symbol: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
     side: Mapped[str | None] = mapped_column(String(10), nullable=True)
     note: Mapped[str | None] = mapped_column(String(1000), nullable=True)
@@ -565,9 +605,9 @@ class CaptureEvent(Base):
     page_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     page_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     source: Mapped[str] = mapped_column(String(80), default="journalme_chrome_extension")
-    screenshot_storage_key: Mapped[str] = mapped_column(String(512))
-    screenshot_original_filename: Mapped[str] = mapped_column(String(255))
-    screenshot_mime: Mapped[str] = mapped_column(String(120))
+    screenshot_storage_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    screenshot_original_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    screenshot_mime: Mapped[str | None] = mapped_column(String(120), nullable=True)
     match_status: Mapped[str] = mapped_column(String(30), default="unmatched", index=True)
     matched_trade_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("trades.id", ondelete="SET NULL"), nullable=True, index=True
@@ -575,6 +615,8 @@ class CaptureEvent(Base):
     match_score: Mapped[Decimal | None] = mapped_column(Numeric(8, 6), nullable=True)
     matched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     match_method: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    episode: Mapped[TradingEpisode | None] = relationship(back_populates="moments")
 
     __table_args__ = (
         Index("ix_capture_events_user_captured", "user_id", "captured_at"),

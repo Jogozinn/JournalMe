@@ -47,10 +47,14 @@ type Screenshot = {
 
 type CompanionCapture = {
   id: string;
+  episode_id?: string | null;
   matched_trade_id: string | null;
-  screenshot_url: string;
+  screenshot_url: string | null;
+  has_screenshot?: boolean;
   captured_at: string;
   event_type: string;
+  phase?: string | null;
+  recorded_live?: boolean;
   match_status: string;
   note: string | null;
   setup_tags: string[];
@@ -342,23 +346,27 @@ export default function TradeReviewPage() {
                       <div className="trade-context-item-head">
                         <div className="trade-context-source-row">
                           <span className={`context-source-badge ${possible ? "possible" : "companion"}`}>{possible ? "Possible match" : "Companion"}</span>
-                          <span className="context-event">{capture.event_type} · {timeOnly(capture.captured_at)}</span>
+                          <span className="context-event">{(capture.phase || capture.event_type).replaceAll("_", " ")} · {timeOnly(capture.captured_at)}{capture.recorded_live === false ? " · added later" : ""}</span>
                         </div>
                         <Link className="button quiet compact" href={`/captures?selected=${capture.id}`}>Open capture</Link>
                       </div>
                       <div className="trade-context-item-body">
-                        <button
-                          className="trade-context-image"
-                          type="button"
-                          onClick={() => setViewer({
-                            path: capture.screenshot_url,
-                            alt: `${possible ? "Possible" : "Companion"} ${capture.event_type} capture`,
-                            captureId: capture.id,
-                          })}
-                          aria-label="Enlarge capture"
-                        >
-                          <AuthenticatedImage path={capture.screenshot_url} alt={`${possible ? "Possible" : "Companion"} ${capture.event_type} capture`} />
-                        </button>
+                        {capture.screenshot_url ? (
+                          <button
+                            className="trade-context-image"
+                            type="button"
+                            onClick={() => setViewer({
+                              path: capture.screenshot_url as string,
+                              alt: `${possible ? "Possible" : "Companion"} ${capture.phase || capture.event_type} moment`,
+                              captureId: capture.id,
+                            })}
+                            aria-label="Enlarge capture"
+                          >
+                            <AuthenticatedImage path={capture.screenshot_url} alt={`${possible ? "Possible" : "Companion"} ${capture.phase || capture.event_type} moment`} />
+                          </button>
+                        ) : (
+                          <div className="trade-context-image trade-context-text-only">Text-only Companion moment</div>
+                        )}
                         <div className="trade-context-copy">
                           {possible && (
                             <div className="possible-match-panel">
@@ -415,7 +423,7 @@ export default function TradeReviewPage() {
               <div className="already-captured-list">
                 {matchedCaptures.map((capture) => (
                   <div key={capture.id}>
-                    <strong>{capture.event_type} · {timeOnly(capture.captured_at)}</strong>
+                    <strong>{(capture.phase || capture.event_type).replaceAll("_", " ")} · {timeOnly(capture.captured_at)}{capture.recorded_live === false ? " · added later" : ""}</strong>
                     {capture.note && <p>{capture.note}</p>}
                     {[...capture.setup_tags, ...capture.execution_tags, ...capture.emotion_tags].length > 0 && (
                       <div className="companion-context-tags">

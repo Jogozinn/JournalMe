@@ -26,6 +26,7 @@ from app.models import (
     TradePlaybook,
     TradeTag,
     TradingAccount,
+    TradingEpisode,
     User,
     utcnow,
 )
@@ -169,6 +170,10 @@ def _merge_disposable_trade(db: Session, target: Trade, duplicate: Trade) -> boo
         select(CaptureEvent).where(CaptureEvent.matched_trade_id == duplicate.id)
     ).all():
         capture.matched_trade_id = target.id
+    for episode in db.scalars(
+        select(TradingEpisode).where(TradingEpisode.matched_trade_id == duplicate.id)
+    ).all():
+        episode.matched_trade_id = target.id
     db.delete(duplicate)
     db.flush()
     return True

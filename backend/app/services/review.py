@@ -110,6 +110,7 @@ def trade_review_statuses(
                 CaptureEvent.match_status == "matched",
                 CaptureEvent.matched_trade_id.in_(trade_ids),
                 CaptureEvent.matched_trade_id.is_not(None),
+                CaptureEvent.screenshot_storage_key.is_not(None),
             )
         ).all()
         if trade_id is not None

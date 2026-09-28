@@ -27,6 +27,7 @@ from app.models import (
     AccountGroupMember,
     Attachment,
     AuditEvent,
+    CaptureEvent,
     DailyBalance,
     DailyJournal,
     Fill,
@@ -46,6 +47,7 @@ from app.models import (
     TradeJournal,
     TradePlaybook,
     TradingAccount,
+    TradingEpisode,
     User,
     UserPreference,
     WeeklyReview,
@@ -1895,6 +1897,12 @@ def export_archive(db: Db, user: CurrentUser) -> StreamingResponse:
         "audit_events": list(
             db.scalars(select(AuditEvent).where(AuditEvent.user_id == user.id)).all()
         ),
+        "trading_episodes": list(
+            db.scalars(select(TradingEpisode).where(TradingEpisode.user_id == user.id)).all()
+        ),
+        "capture_events": list(
+            db.scalars(select(CaptureEvent).where(CaptureEvent.user_id == user.id)).all()
+        ),
     }
     attachments = list(
         db.scalars(
@@ -1955,6 +1963,18 @@ def export_archive(db: Db, user: CurrentUser) -> StreamingResponse:
             "data/attachments.json",
             json.dumps([_model_dict(item) for item in attachments], indent=2),
         )
+        capture_events = tables["capture_events"]
+        for item in capture_events:
+            if not item.screenshot_storage_key:
+                continue
+            safe_name = Path(item.screenshot_original_filename or "capture.png").name
+            try:
+                bundle.writestr(
+                    f"companion/{item.id}-{safe_name}",
+                    storage.get(item.screenshot_storage_key),
+                )
+            except FileNotFoundError:
+                continue
     archive.seek(0)
     return StreamingResponse(
         archive,
@@ -1962,6 +1982,242 @@ def export_archive(db: Db, user: CurrentUser) -> StreamingResponse:
         headers={
             "Content-Disposition": 'attachment; filename="journalme-full-backup.zip"'
         },
+    )
+
+
+@router.get("/exports/waverr-research.zip")
+def export_waverr_research_pack(
+    account_id: UUID,
+    db: Db,
+    user: CurrentUser,
+) -> StreamingResponse:
+    """Export time-aligned Companion episodes for WaveRR research.
+
+    Live observations are kept distinct from post-outcome data so downstream
+    research can avoid hindsight leakage. This is a research export only; it
+    does not modify WaveRR or any production trading behavior.
+    """
+    account = _account(db, user, account_id)
+    episodes = list(
+        db.scalars(
+            select(TradingEpisode)
+            .where(
+                TradingEpisode.user_id == user.id,
+                TradingEpisode.account_id == account.id,
+            )
+            .order_by(TradingEpisode.started_at.asc())
+        ).all()
+    )
+    storage = get_storage_provider(get_settings())
+    archive = io.BytesIO()
+    episode_index: list[dict[str, Any]] = []
+    legacy_captures = list(
+        db.scalars(
+            select(CaptureEvent)
+            .where(
+                CaptureEvent.user_id == user.id,
+                CaptureEvent.account_id == account.id,
+                CaptureEvent.episode_id.is_(None),
+            )
+            .order_by(CaptureEvent.captured_at.asc())
+        ).all()
+    )
+
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for episode in episodes:
+            moments = list(
+                db.scalars(
+                    select(CaptureEvent)
+                    .where(CaptureEvent.episode_id == episode.id)
+                    .order_by(CaptureEvent.captured_at.asc(), CaptureEvent.created_at.asc())
+                ).all()
+            )
+            folder = f"episodes/{episode.id}"
+            moment_payloads: list[dict[str, Any]] = []
+            for position, moment in enumerate(moments, start=1):
+                payload = _model_dict(
+                    moment,
+                    exclude={"screenshot_storage_key", "screenshot_original_filename", "screenshot_mime"},
+                )
+                payload["knowledge_stage"] = "decision_time" if moment.recorded_live else "retrospective_addition"
+                payload["sequence"] = position
+                payload["has_screenshot"] = bool(moment.screenshot_storage_key)
+                payload["screenshot_path"] = None
+                if moment.screenshot_storage_key:
+                    original = Path(moment.screenshot_original_filename or "capture.png")
+                    suffix = original.suffix.lower() if original.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"} else ".png"
+                    phase = (moment.phase or moment.event_type or "moment").replace("/", "-")
+                    screenshot_path = f"{folder}/screenshots/{position:03d}_{phase}_{moment.id}{suffix}"
+                    try:
+                        bundle.writestr(screenshot_path, storage.get(moment.screenshot_storage_key))
+                        payload["screenshot_path"] = screenshot_path
+                    except FileNotFoundError:
+                        payload["screenshot_missing"] = True
+                moment_payloads.append(payload)
+
+            trade = db.get(Trade, episode.matched_trade_id) if episode.matched_trade_id else None
+            fills: list[Fill] = []
+            orders: list[Order] = []
+            trade_payload: dict[str, Any] | None = None
+            review_payload: dict[str, Any] | None = None
+            if trade is not None and trade.account_id == account.id:
+                fills = list(
+                    db.scalars(
+                        select(Fill)
+                        .where(Fill.trade_id == trade.id)
+                        .order_by(Fill.timestamp.asc())
+                    ).all()
+                )
+                external_order_ids = {fill.external_order_id for fill in fills if fill.external_order_id}
+                if external_order_ids:
+                    orders = list(
+                        db.scalars(
+                            select(Order)
+                            .where(
+                                Order.account_id == account.id,
+                                Order.external_order_id.in_(external_order_ids),
+                            )
+                            .order_by(Order.submitted_timestamp.asc())
+                        ).all()
+                    )
+                trade_payload = _model_dict(trade)
+                trade_payload["knowledge_stage"] = "outcome"
+                trade_payload["tags"] = [
+                    {"id": str(tag.id), "name": tag.name, "category": tag.category.value}
+                    for tag in trade.tags
+                ]
+                journal = db.get(TradeJournal, trade.id)
+                if journal is not None:
+                    review_payload = _model_dict(journal)
+                    review_payload["knowledge_stage"] = "post_outcome_review"
+
+            local_date = _as_utc(episode.started_at).astimezone(ZoneInfo(account.timezone)).date()
+            daily_journal = db.scalar(
+                select(DailyJournal).where(
+                    DailyJournal.account_id == account.id,
+                    DailyJournal.trading_date == local_date,
+                )
+            )
+            daily_payload = _model_dict(daily_journal) if daily_journal is not None else None
+            if daily_payload is not None:
+                daily_payload["knowledge_stage"] = "mixed_session_context_and_review"
+
+            episode_payload = _model_dict(episode)
+            episode_payload.update(
+                {
+                    "knowledge_model": {
+                        "decision_time": "recorded_live moments and their screenshots; safe as contemporaneous human evidence",
+                        "retrospective_addition": "added later; do not feed backward into entry-time evaluation without an explicit hindsight flag",
+                        "outcome": "trade/fill/order results known after execution",
+                        "post_outcome_review": "review/reflection written with outcome knowledge",
+                    },
+                    "moment_count": len(moment_payloads),
+                    "matched_trade_id": str(trade.id) if trade is not None else None,
+                }
+            )
+            bundle.writestr(f"{folder}/episode.json", json.dumps(episode_payload, indent=2))
+            bundle.writestr(
+                f"{folder}/moments.jsonl",
+                "".join(json.dumps(item) + "\n" for item in moment_payloads),
+            )
+            if trade_payload is not None:
+                bundle.writestr(f"{folder}/trade.json", json.dumps(trade_payload, indent=2))
+                bundle.writestr(f"{folder}/fills.json", json.dumps([_model_dict(item) for item in fills], indent=2))
+                bundle.writestr(f"{folder}/orders.json", json.dumps([_model_dict(item) for item in orders], indent=2))
+            if review_payload is not None:
+                bundle.writestr(f"{folder}/review.json", json.dumps(review_payload, indent=2))
+            if daily_payload is not None:
+                bundle.writestr(f"{folder}/daily_journal.json", json.dumps(daily_payload, indent=2))
+
+            episode_index.append(
+                {
+                    "episode_id": str(episode.id),
+                    "status": episode.status,
+                    "symbol": episode.symbol,
+                    "side": episode.side,
+                    "started_at": _as_utc(episode.started_at).isoformat(),
+                    "ended_at": _as_utc(episode.ended_at).isoformat() if episode.ended_at else None,
+                    "moment_count": len(moment_payloads),
+                    "screenshot_count": sum(1 for item in moment_payloads if item.get("screenshot_path")),
+                    "matched_trade_id": str(trade.id) if trade is not None else None,
+                    "folder": folder,
+                }
+            )
+
+        # Preserve pre-timeline Companion history too. These records are
+        # intentionally not mutated into database episodes; the export labels
+        # them as legacy single moments and keeps any trade match for grouping.
+        legacy_index: list[dict[str, Any]] = []
+        for capture in legacy_captures:
+            folder = f"legacy_captures/{capture.id}"
+            payload = _model_dict(
+                capture,
+                exclude={"screenshot_storage_key", "screenshot_original_filename", "screenshot_mime"},
+            )
+            payload["knowledge_stage"] = "legacy_timing_unverified"
+            payload["legacy_single_moment"] = True
+            payload["has_screenshot"] = bool(capture.screenshot_storage_key)
+            payload["screenshot_path"] = None
+            if capture.screenshot_storage_key:
+                original = Path(capture.screenshot_original_filename or "capture.png")
+                suffix = original.suffix.lower() if original.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"} else ".png"
+                screenshot_path = f"{folder}/screenshot{suffix}"
+                try:
+                    bundle.writestr(screenshot_path, storage.get(capture.screenshot_storage_key))
+                    payload["screenshot_path"] = screenshot_path
+                except FileNotFoundError:
+                    payload["screenshot_missing"] = True
+            bundle.writestr(f"{folder}/moment.json", json.dumps(payload, indent=2))
+            legacy_index.append(
+                {
+                    "capture_id": str(capture.id),
+                    "captured_at": _as_utc(capture.captured_at).isoformat(),
+                    "symbol": capture.symbol,
+                    "event_type": capture.event_type,
+                    "matched_trade_id": str(capture.matched_trade_id) if capture.matched_trade_id else None,
+                    "folder": folder,
+                }
+            )
+
+        manifest = {
+            "product": "JournalMe",
+            "export_type": "waverr_research_pack",
+            "schema_version": 1,
+            "generated_at": utcnow().isoformat(),
+            "account": {
+                "id": str(account.id),
+                "name": account.name,
+                "provider": account.provider,
+                "timezone": account.timezone,
+                "currency": account.currency,
+            },
+            "research_contract": {
+                "purpose": "Time-aligned human trading observations for WaveRR research and hypothesis generation.",
+                "production_change": "None. Importing this pack must not directly alter live/canary production behavior.",
+                "hindsight_rule": "Respect knowledge_stage and recorded_live. Outcome/review data must not be treated as information available at decision time.",
+                "episode_definition": "An observation timeline that may contain one or many moments and may or may not have a trade.",
+            },
+            "episodes": episode_index,
+            "legacy_captures": legacy_index,
+            "legacy_capture_count": len(legacy_index),
+        }
+        bundle.writestr("manifest.json", json.dumps(manifest, indent=2))
+        bundle.writestr(
+            "README.txt",
+            "JournalMe -> WaveRR Research Pack\n\n"
+            "Each episode preserves chronological human observations, optional screenshots, and any matched canonical trade evidence.\n"
+            "Pre-timeline Companion captures are included under legacy_captures so existing research data is not lost.\n"
+            "Use recorded_live/knowledge_stage to prevent hindsight leakage. A WAIT/no-trade episode is valid research data.\n"
+            "This package is for research only and should flow through WaveRR hypothesis/testing/governance before any production change.\n",
+        )
+
+    archive.seek(0)
+    safe_account = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in account.name).strip("-") or "account"
+    filename = f"journalme-waverr-research-{safe_account}.zip"
+    return StreamingResponse(
+        archive,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

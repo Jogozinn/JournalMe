@@ -13,6 +13,9 @@ type CaptureItem = {
   captured_at: string;
   created_at: string;
   event_type: "entry" | "exit" | "update" | "wait";
+  episode_id?: string | null;
+  phase?: string | null;
+  recorded_live?: boolean;
   symbol: string | null;
   side: "long" | "short" | null;
   note: string | null;
@@ -26,7 +29,8 @@ type CaptureItem = {
   match_status: "unmatched" | "suggested" | "matched" | string;
   matched_trade_id: string | null;
   match_score: number | null;
-  screenshot_url: string;
+  has_screenshot?: boolean;
+  screenshot_url: string | null;
 };
 
 type Filter = "all" | "matched" | "suggested" | "unmatched";
@@ -186,7 +190,7 @@ export default function CapturesPage() {
                     {item.side && <span className={`side-token ${item.side}`}>{item.side}</span>}
                     <span className={`capture-match ${item.match_status}`}>{statusLabel(item.match_status)}</span>
                   </div>
-                  <span>{item.event_type} · {item.platform || "Browser"}</span>
+                  <span>{item.phase ? item.phase.replaceAll("_", " ") : item.event_type} · {item.platform || "Browser"}</span>
                   <small>{dateTime(item.captured_at)}</small>
                   {item.note && <p>{item.note}</p>}
                 </button>
@@ -209,16 +213,20 @@ export default function CapturesPage() {
               <>
                 <div className="capture-detail-head">
                   <div>
-                    <span className="capture-kicker">{selected.event_type} · {selected.platform || "Browser"}</span>
+                    <span className="capture-kicker">{selected.phase ? selected.phase.replaceAll("_", " ") : selected.event_type} · {selected.platform || "Browser"}{selected.recorded_live === false ? " · added later" : ""}</span>
                     <h2>{selected.symbol || "Wait capture"}{selected.side ? ` · ${selected.side}` : ""}</h2>
                     <p>{dateTime(selected.captured_at)}</p>
                   </div>
                   <span className={`capture-match ${selected.match_status}`}>{statusLabel(selected.match_status)}</span>
                 </div>
 
-                <div className="capture-image-frame">
-                  <AuthenticatedImage path={selected.screenshot_url} alt={`JournalMe capture ${selected.symbol || "WAIT"}`} />
-                </div>
+                {selected.screenshot_url ? (
+                  <div className="capture-image-frame">
+                    <AuthenticatedImage path={selected.screenshot_url} alt={`JournalMe capture ${selected.symbol || "WAIT"}`} />
+                  </div>
+                ) : (
+                  <div className="capture-image-frame capture-text-only">Text-only Companion moment</div>
+                )}
 
                 {selected.note && (
                   <div className="capture-note-wrap">

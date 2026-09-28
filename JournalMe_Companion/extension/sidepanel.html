@@ -11,7 +11,7 @@
     <header class="topbar">
       <div>
         <div class="brand">JournalMe</div>
-        <div class="sub">Capture without leaving the chart</div>
+        <div class="sub">Capture the thought while it is still live</div>
       </div>
       <button id="captureBtn" class="ghost" type="button">Take screenshot</button>
     </header>
@@ -24,9 +24,7 @@
           <span id="connectionDetail">Loading connection status</span>
         </div>
       </div>
-      <div class="connection-actions">
-        <button id="signOutBtn" class="ghost compact" type="button" hidden>Sign out</button>
-      </div>
+      <button id="signOutBtn" class="ghost compact" type="button" hidden>Sign out</button>
     </section>
 
     <section id="authCard" class="card auth-card" hidden>
@@ -34,14 +32,8 @@
         <div class="section-title">Sign in to JournalMe</div>
         <div class="sub">The Companion syncs directly to your cloud journal. The website does not need to be open.</div>
       </div>
-      <label>
-        <span>Email</span>
-        <input id="authEmail" type="email" autocomplete="email" placeholder="you@example.com" />
-      </label>
-      <label>
-        <span>Password</span>
-        <input id="authPassword" type="password" autocomplete="current-password" />
-      </label>
+      <label><span>Email</span><input id="authEmail" type="email" autocomplete="email" placeholder="you@example.com" /></label>
+      <label><span>Password</span><input id="authPassword" type="password" autocomplete="current-password" /></label>
       <div id="authError" class="status error"></div>
       <button id="signInBtn" class="primary" type="button">Sign in</button>
       <div class="auth-links">
@@ -50,33 +42,28 @@
       </div>
     </section>
 
-    <section id="brokerSyncCard" class="card broker-sync-card" hidden>
+    <section id="activeEpisodeCard" class="card episode-card" hidden>
       <div class="section-title-row">
         <div>
-          <div class="section-title">Tradovate Quick Sync</div>
-          <div class="sub">Choose Performance + Fills. Add Account Balance History to refresh the broker balance too.</div>
+          <div class="eyebrow">ACTIVE EPISODE</div>
+          <div id="activeEpisodeTitle" class="section-title">Trading observation</div>
+          <div id="activeEpisodeMeta" class="sub"></div>
         </div>
-        <span class="sync-pill">REPORT SYNC</span>
+        <button id="endEpisodeBtn" class="ghost compact" type="button">End</button>
       </div>
-      <div class="broker-sync-grid">
-        <div><strong>Core</strong><span>Performance + Fills</span></div>
-        <div><strong>Recommended</strong><span>Balance History</span></div>
-      </div>
-      <input id="brokerFiles" type="file" accept=".csv,text/csv" multiple hidden />
-      <button id="brokerSyncBtn" class="primary" type="button">Sync reports</button>
-      <div id="brokerSyncStatus" class="status"></div>
+      <div id="activeTimeline" class="timeline"></div>
     </section>
 
     <section id="captureCard" class="card capture-card">
       <div class="screenshot-wrap">
         <img id="preview" alt="Pending chart capture" />
         <div id="emptyPreview" class="empty-preview">
-          <strong>No capture yet</strong>
-          <span>Press Alt+C anywhere, or use Take screenshot.</span>
+          <strong>Screenshot optional</strong>
+          <span>Press Alt+C anywhere, use Take screenshot, or just save a thought.</span>
         </div>
       </div>
       <div class="meta-row">
-        <span id="platform">No capture</span>
+        <span id="platform">No screenshot attached</span>
         <span id="capturedAt"></span>
       </div>
     </section>
@@ -84,108 +71,86 @@
     <section class="card form-card">
       <div class="section-row">
         <div>
-          <div class="section-title">Log the moment</div>
-          <div class="sub">Everything here saves with the screenshot.</div>
+          <div class="eyebrow">ADD MOMENT</div>
+          <div class="section-title">What changed?</div>
+          <div class="sub">One moment is enough. Add another only when it helps.</div>
         </div>
         <button id="openJournalBtn" class="text-btn" type="button">Open JournalMe</button>
       </div>
 
       <label class="field account-field">
         <span class="label">Save to account</span>
-        <select id="account">
-          <option value="">Automatic account</option>
-        </select>
+        <select id="account"><option value="">Automatic account</option></select>
         <span id="accountHint" class="account-hint"></span>
       </label>
 
-      <div class="segmented" aria-label="Capture type">
-        <button class="seg active" data-event="entry" type="button">Entry</button>
-        <button class="seg" data-event="exit" type="button">Exit</button>
-        <button class="seg" data-event="update" type="button">Update</button>
-        <button class="seg" data-event="wait" type="button">Wait</button>
-      </div>
-
       <div class="grid2">
-        <label>
-          <span>Symbol</span>
-          <input id="symbol" maxlength="24" placeholder="MNQ" autocomplete="off" />
-        </label>
-        <label>
-          <span>Side</span>
-          <select id="side">
-            <option value="">Not set</option>
-            <option value="long">Long</option>
-            <option value="short">Short</option>
-          </select>
-        </label>
-      </div>
-
-      <div class="field tag-field">
-        <div class="tag-heading">
-          <div class="label">Setup / context</div>
-          <span>Choose any</span>
-        </div>
-        <div id="setupTags" class="chips"></div>
-        <div class="custom-tag-row">
-          <input id="setupCustom" maxlength="60" placeholder="Add your own setup or context" autocomplete="off" />
-          <button id="addSetupCustom" type="button">Add</button>
-        </div>
-      </div>
-
-      <div class="field tag-field">
-        <div class="tag-heading">
-          <div class="label">Execution</div>
-          <span>What actually happened</span>
-        </div>
-        <div id="executionTags" class="chips"></div>
-        <div class="custom-tag-row">
-          <input id="executionCustom" maxlength="60" placeholder="Add your own execution note" autocomplete="off" />
-          <button id="addExecutionCustom" type="button">Add</button>
-        </div>
-      </div>
-
-      <div class="field tag-field">
-        <div class="tag-heading">
-          <div class="label">State</div>
-          <span>Mindset or emotion</span>
-        </div>
-        <div id="emotionTags" class="chips"></div>
-        <div class="custom-tag-row">
-          <input id="emotionCustom" maxlength="60" placeholder="Add your own state" autocomplete="off" />
-          <button id="addEmotionCustom" type="button">Add</button>
-        </div>
+        <label><span>Symbol</span><input id="symbol" maxlength="24" placeholder="MNQ" autocomplete="off" /></label>
+        <label><span>Side</span><select id="side"><option value="">Not set</option><option value="long">Long</option><option value="short">Short</option></select></label>
       </div>
 
       <label class="field">
-        <span class="label">Quick note</span>
-        <textarea id="note" maxlength="1000" rows="4" placeholder="What mattered here?"></textarea>
+        <span class="label">Thought</span>
+        <textarea id="note" maxlength="1000" rows="4" placeholder="What are you seeing, waiting for, or changing your mind about?"></textarea>
       </label>
 
-      <div class="status-row">
-        <div id="status" class="status"></div>
-        <button id="openSavedBtn" class="text-btn" type="button" hidden>Open saved</button>
+      <div class="field">
+        <div class="tag-heading"><div class="label">Optional phase</div><span>Tap again to clear</span></div>
+        <div class="phase-grid" aria-label="Optional moment phase">
+          <button class="phase" data-phase="pre_entry" type="button">Pre-entry</button>
+          <button class="phase" data-phase="confirmation" type="button">Confirmation</button>
+          <button class="phase" data-phase="entry" type="button">Entry</button>
+          <button class="phase" data-phase="management" type="button">Management</button>
+          <button class="phase" data-phase="exit" type="button">Exit</button>
+          <button class="phase" data-phase="wait" type="button">Wait</button>
+          <button class="phase" data-phase="post_trade" type="button">Post-trade</button>
+        </div>
       </div>
 
-      <button id="saveBtn" class="primary" type="button">Save capture</button>
-      <button id="clearBtn" class="text-btn clear-btn" type="button">Clear pending capture</button>
+      <details class="context-details">
+        <summary>Add context <span>optional</span></summary>
+        <div class="field tag-field">
+          <div class="tag-heading"><div class="label">Setup / context</div><span>Choose any</span></div>
+          <div id="setupTags" class="chips"></div>
+          <div class="custom-tag-row"><input id="setupCustom" maxlength="60" placeholder="Add your own setup or context" autocomplete="off" /><button id="addSetupCustom" type="button">Add</button></div>
+        </div>
+        <div class="field tag-field">
+          <div class="tag-heading"><div class="label">Execution</div><span>What actually happened</span></div>
+          <div id="executionTags" class="chips"></div>
+          <div class="custom-tag-row"><input id="executionCustom" maxlength="60" placeholder="Add your own execution note" autocomplete="off" /><button id="addExecutionCustom" type="button">Add</button></div>
+        </div>
+        <div class="field tag-field">
+          <div class="tag-heading"><div class="label">State</div><span>Mindset or emotion</span></div>
+          <div id="emotionTags" class="chips"></div>
+          <div class="custom-tag-row"><input id="emotionCustom" maxlength="60" placeholder="Add your own state" autocomplete="off" /><button id="addEmotionCustom" type="button">Add</button></div>
+        </div>
+      </details>
+
+      <div class="status-row"><div id="status" class="status"></div><button id="openSavedBtn" class="text-btn" type="button" hidden>Open saved</button></div>
+      <button id="saveBtn" class="primary" type="button">Save moment</button>
+      <button id="clearBtn" class="text-btn clear-btn" type="button">Clear pending screenshot</button>
     </section>
 
     <section class="card recent-card">
       <div class="section-title-row">
-        <div>
-          <div class="section-title">Recent captures</div>
-          <div class="sub">Saved directly to JournalMe.</div>
-        </div>
+        <div><div class="section-title">Recent episodes</div><div class="sub">Ideas, trades, updates, and waits.</div></div>
         <button id="refreshBtn" class="text-btn" type="button">Refresh</button>
       </div>
-      <div id="recent" class="recent-list">
-        <div class="muted">No captures loaded.</div>
-      </div>
+      <div id="recent" class="recent-list"><div class="muted">No episodes loaded.</div></div>
     </section>
 
-    <footer>
-      <a href="options.html" target="_blank">Connection settings</a>
-    </footer>
+    <section id="brokerSyncCard" class="card broker-sync-card" hidden>
+      <div class="section-title-row">
+        <div><div class="section-title">Tradovate Quick Sync</div><div class="sub">Maintenance tool: Performance + Fills, with Balance History recommended.</div></div>
+        <span class="sync-pill">REPORT SYNC</span>
+      </div>
+      <div class="broker-sync-grid"><div><strong>Core</strong><span>Performance + Fills</span></div><div><strong>Recommended</strong><span>Balance History</span></div></div>
+      <input id="brokerFiles" type="file" accept=".csv,text/csv" multiple hidden />
+      <button id="brokerSyncBtn" class="primary" type="button">Sync reports</button>
+      <div id="brokerSyncStatus" class="status"></div>
+    </section>
+
+    <footer><a href="options.html" target="_blank">Connection settings</a></footer>
   </main>
   <script src="sidepanel.js"></script>
 </body>

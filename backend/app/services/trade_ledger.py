@@ -24,6 +24,7 @@ from app.models import (
     TradePlaybook,
     TradeTag,
     TradingAccount,
+    TradingEpisode,
 )
 from app.services.instrument_identity import canonical_contract_key, root_symbol
 from app.services.broker_ingestion import reconstruct_round_trips
@@ -360,6 +361,10 @@ def _move_safe_relations(db: Session, target: Trade, duplicate: Trade) -> None:
         select(CaptureEvent).where(CaptureEvent.matched_trade_id == duplicate.id)
     ).all():
         capture.matched_trade_id = target.id
+    for episode in db.scalars(
+        select(TradingEpisode).where(TradingEpisode.matched_trade_id == duplicate.id)
+    ).all():
+        episode.matched_trade_id = target.id
 
 
 def _fees_for_lifecycle(lifecycle: PersistedLifecycle) -> Decimal | None:
@@ -411,8 +416,14 @@ def _repair_group(
     if lifecycle is not None:
         # Old paired-report rows are lot accounting, not JournalMe trades. The
         # persisted fills provide the authoritative flat-to-flat boundaries.
-        target.symbol = lifecycle.symbol
-        target.root_symbol = root_symbol(lifecycle.symbol)
+        # If this row came from the live broker bridge, keep its user-facing
+        # contract notation (for example, MNQ 12-26) while using canonical
+        # contract identity to reconcile it with an imported symbol like MNQZ6.
+        had_live_source = target.source_quality in {"broker_live", "multi_source_reconciled"}
+        preserve_live_symbol = had_live_source and bool(target.symbol)
+        if not preserve_live_symbol:
+            target.symbol = lifecycle.symbol
+            target.root_symbol = root_symbol(lifecycle.symbol)
         target.side = lifecycle.side
         target.contract_quantity = lifecycle.quantity
         target.entry_price = lifecycle.entry_price
@@ -445,7 +456,7 @@ def _repair_group(
         )
         target.fees = _fees_for_lifecycle(lifecycle)
         target.net_pnl = target.gross_pnl - target.fees if target.fees is not None else target.gross_pnl
-        target.source_quality = "ledger_reconciled"
+        target.source_quality = "multi_source_reconciled" if had_live_source else "ledger_reconciled"
         target.reconciliation_status = "reconciled" if target.fees is not None else "warning"
 
     payload = dict(target.source_payload or {})
@@ -656,6 +667,10 @@ def reconcile_trade_ledger(db: Session, account: TradingAccount) -> dict[str, An
                 select(CaptureEvent).where(CaptureEvent.matched_trade_id == row.id)
             ).all():
                 capture.matched_trade_id = nearest.id
+            for episode in db.scalars(
+                select(TradingEpisode).where(TradingEpisode.matched_trade_id == row.id)
+            ).all():
+                episode.matched_trade_id = nearest.id
         db.delete(row)
         collapsed += 1
         suppressed_by_authoritative_fills += 1
