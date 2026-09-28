@@ -7379,8 +7379,8 @@ input[type="datetime-local"] {
 /* Companion mode: fast live observation capture on phone and desktop. */
 .companion-page {
   display: grid;
-  gap: 18px;
-  width: min(980px, 100%);
+  gap: 16px;
+  width: min(900px, 100%);
   margin: 0 auto;
 }
 
@@ -7395,6 +7395,13 @@ input[type="datetime-local"] {
 .companion-history-card {
   display: grid;
   gap: 16px;
+  padding: 20px;
+  border-color: rgba(160, 190, 171, .16);
+  border-radius: 20px;
+  background:
+    linear-gradient(145deg, rgba(124, 204, 157, .018), transparent 38%),
+    rgba(13, 18, 15, .92);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .14);
 }
 
 .companion-active-head,
@@ -7410,7 +7417,7 @@ input[type="datetime-local"] {
   max-width: 42%;
   overflow: hidden;
   color: var(--muted);
-  font-size: .76rem;
+  font-size: .72rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -7419,9 +7426,9 @@ input[type="datetime-local"] {
   display: grid;
   gap: 5px;
   border: 1px dashed rgba(149, 188, 162, .35);
-  border-radius: 12px;
-  background: rgba(255,255,255,.018);
-  padding: 16px;
+  border-radius: 15px;
+  background: rgba(255,255,255,.014);
+  padding: 17px;
   cursor: pointer;
 }
 
@@ -7458,8 +7465,23 @@ input[type="datetime-local"] {
 }
 
 .companion-note-field textarea {
-  min-height: 112px;
+  min-height: 104px;
   resize: vertical;
+}
+
+
+.companion-field-label {
+  margin-bottom: -4px;
+  color: var(--muted);
+  font-size: .74rem;
+  font-weight: 600;
+}
+
+.companion-field-label span {
+  margin-left: 5px;
+  font-size: .68rem;
+  font-weight: 500;
+  opacity: .78;
 }
 
 .companion-phase-row,
@@ -7533,11 +7555,44 @@ input[type="datetime-local"] {
 
 .companion-save {
   width: 100%;
-  min-height: 48px;
+  min-height: 46px;
+  margin-top: 2px;
 }
 
 .companion-status { margin: 0; }
 .companion-loading { color: var(--muted); }
+
+.companion-active-card.is-empty {
+  gap: 8px;
+  padding-block: 16px;
+}
+
+.companion-active-card.is-empty .companion-active-head {
+  align-items: center;
+}
+
+.companion-active-card.is-empty .muted {
+  margin: 4px 0 0;
+  line-height: 1.45;
+}
+
+.companion-empty-state {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid rgba(160, 190, 171, .11);
+  padding-top: 12px;
+}
+
+.companion-empty-state strong {
+  font-size: .83rem;
+  font-weight: 650;
+}
+
+.companion-empty-state span {
+  color: var(--muted);
+  font-size: .76rem;
+  line-height: 1.45;
+}
 
 .companion-timeline {
   display: grid;
@@ -7668,20 +7723,83 @@ input[type="datetime-local"] {
 }
 
 @media (max-width: 720px) {
+  .app-shell.companion-route main {
+    padding: 18px 16px calc(92px + env(safe-area-inset-bottom));
+  }
+
+  .app-shell.companion-route .broker-live-shell,
+  .app-shell.companion-route .learning-notification-shell {
+    display: none;
+  }
+
+  .app-shell.companion-route .bottom-nav .import-action {
+    width: 46px;
+    height: 46px;
+    min-height: 46px;
+    margin-top: 3px;
+    transform: none;
+    border: 1px solid rgba(147, 210, 170, .28);
+    background: rgba(129, 205, 157, .11);
+    color: var(--accent);
+    box-shadow: none;
+  }
+
+  .app-shell.companion-route .bottom-nav .import-action.active {
+    border-color: rgba(147, 210, 170, .42);
+    background: rgba(129, 205, 157, .17);
+    color: #c9eed8;
+  }
+
   .companion-page {
-    gap: 12px;
-    padding-bottom: 82px;
+    gap: 14px;
+    padding-bottom: 8px;
   }
 
   .companion-page .page-header {
-    padding-bottom: 4px;
+    gap: 7px;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+  }
+
+  .companion-page .page-header h1 {
+    margin: 2px 0 2px;
+    font-size: 30px;
+    line-height: 1.04;
+  }
+
+  .companion-page .page-header > div > p:not(.eyebrow) {
+    max-width: 34rem;
+    font-size: 13px;
+    line-height: 1.45;
   }
 
   .companion-active-card,
   .companion-capture-card,
   .companion-recent-card,
   .companion-history-card {
-    gap: 13px;
+    gap: 14px;
+    padding: 16px;
+    border-color: rgba(160, 190, 171, .14);
+    border-radius: 18px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.12);
+  }
+
+  .companion-active-card.is-empty {
+    gap: 6px;
+    padding: 13px 15px;
+  }
+
+  .companion-active-card.is-empty .eyebrow {
+    font-size: 8px;
+  }
+
+  .companion-active-card.is-empty h2 {
+    font-size: 1rem;
+  }
+
+  .companion-active-card.is-empty .muted {
+    margin-top: 2px;
+    font-size: .76rem;
   }
 
   .companion-active-head,
@@ -7690,28 +7808,122 @@ input[type="datetime-local"] {
     align-items: flex-start;
   }
 
-  .companion-symbol-row {
-    grid-template-columns: 1fr 1fr;
+  .companion-capture-head {
+    display: grid;
+    gap: 3px;
+  }
+
+  .companion-capture-head > span {
+    max-width: 100%;
+    font-size: .68rem;
+  }
+
+  .companion-capture-card > .companion-capture-head h2,
+  .companion-recent-card h2 {
+    font-size: 1.08rem;
+  }
+
+  .companion-upload {
+    min-height: 70px;
+    border-radius: 14px;
+    padding: 14px;
+  }
+
+  .companion-upload strong {
+    font-size: .84rem;
+  }
+
+  .companion-upload span {
+    font-size: .7rem;
+    line-height: 1.4;
+  }
+
+  .companion-note-field {
+    gap: 6px;
+  }
+
+  .companion-note-field textarea {
+    min-height: 88px;
+    padding: 11px 12px;
+    line-height: 1.45;
+  }
+
+  .companion-field-label {
+    margin-bottom: -5px;
+    font-size: .7rem;
   }
 
   .companion-phase-row {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
   }
 
   .companion-phase-row button {
     min-height: 38px;
+    padding: 6px 5px;
+    font-size: .68rem;
   }
 
-  .companion-upload {
-    min-height: 72px;
+  .companion-symbol-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .companion-symbol-row label {
+    gap: 5px;
+  }
+
+  .companion-symbol-row input,
+  .companion-symbol-row select {
+    min-height: 42px;
+  }
+
+  .companion-details {
+    padding-top: 11px;
+  }
+
+  .companion-details summary {
+    font-size: .86rem;
   }
 
   .companion-save {
     position: static;
-    bottom: auto;
-    z-index: auto;
+    min-height: 45px;
+    margin-top: 0;
     box-shadow: none;
+  }
+
+  .companion-section-head {
+    gap: 10px;
+  }
+
+  .companion-section-head .button.quiet {
+    min-height: 34px;
+    padding-inline: 10px;
+    font-size: .7rem;
+  }
+
+  .companion-recent-card.is-empty {
+    gap: 9px;
+    padding-block: 14px;
+  }
+
+  .companion-recent-card.is-empty .companion-section-head {
+    align-items: center;
+  }
+
+  .companion-empty-state {
+    padding-top: 9px;
+  }
+
+  .companion-timeline {
+    padding-left: 13px;
+  }
+
+  .companion-moment {
+    padding: 11px;
+    border-radius: 11px;
   }
 }
 

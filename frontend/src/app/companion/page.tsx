@@ -272,7 +272,7 @@ export default function CompanionPage() {
 
       {!loading && (
         <>
-          <section className="card companion-active-card">
+          <section className={`card companion-active-card ${active ? "is-active" : "is-empty"}`}>
             <div className="companion-active-head">
               <div>
                 <p className="eyebrow">{active ? "Active episode" : "Ready when you are"}</p>
@@ -319,6 +319,7 @@ export default function CompanionPage() {
               />
             </label>
 
+            <div className="companion-field-label">Stage <span>optional</span></div>
             <div className="companion-phase-row" aria-label="Optional moment phase">
               {PHASES.map((item) => (
                 <button
@@ -360,7 +361,7 @@ export default function CompanionPage() {
             </button>
           </section>
 
-          <section className="card companion-recent-card">
+          <section className={`card companion-recent-card ${!recent.length ? "is-empty" : ""}`}>
             <div className="companion-section-head">
               <div>
                 <p className="eyebrow">Recent episodes</p>
@@ -368,7 +369,12 @@ export default function CompanionPage() {
               </div>
               <button className="button quiet" type="button" onClick={() => void refresh()}>Refresh</button>
             </div>
-            {!recent.length && <p className="muted">No episode-based Companion activity yet. Existing legacy captures are still available on the Captures page.</p>}
+            {!recent.length && (
+              <div className="companion-empty-state">
+                <strong>No episodes yet</strong>
+                <span>Your first saved moment will appear here. Older captures remain on the Captures page.</span>
+              </div>
+            )}
             <div className="companion-episode-list">
               {recent.map((episode) => (
                 <button key={episode.id} type="button" onClick={() => void viewEpisode(episode.id)}>

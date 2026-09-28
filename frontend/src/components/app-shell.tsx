@@ -160,7 +160,7 @@ function ShellContent({ children }: { children: React.ReactNode }) {
 
   return (
     <div
-      className={`app-shell ${sidebarCompact ? "sidebar-compact" : ""} ${pendingPath ? "route-pending" : ""} ${mobileSidebarOpen ? "sidebar-mobile-open" : ""}`}
+      className={`app-shell ${sidebarCompact ? "sidebar-compact" : ""} ${pendingPath ? "route-pending" : ""} ${mobileSidebarOpen ? "sidebar-mobile-open" : ""} ${routeMatches(activePath, "/companion") ? "companion-route" : ""}`}
     >
       <div className="route-progress" aria-hidden="true" />
       <button className="sidebar-scrim" type="button" aria-label="Close navigation" onClick={() => setMobileSidebarOpen(false)} />
@@ -273,7 +273,12 @@ function ShellContent({ children }: { children: React.ReactNode }) {
             <span>{item.label}</span>
           </Link>
         ))}
-        <Link href="/companion" className="import-action" aria-label="Open Companion mode" title="Companion">
+        <Link
+          href="/companion"
+          className={`import-action ${routeMatches(activePath, "/companion") ? "active" : ""}`}
+          aria-label="Open Companion mode"
+          title="Companion"
+        >
           <Icon name="capture" />
         </Link>
         <Link href="/calendar" className={routeMatches(activePath, "/calendar") ? "active" : ""}>
