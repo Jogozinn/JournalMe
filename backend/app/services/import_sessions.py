@@ -45,6 +45,7 @@ from app.services.importer import (
 from app.services.capture_matching import reconcile_unmatched_captures
 from app.services.instrument_identity import canonical_contract_key, root_symbol
 from app.services.reconciliation import CanonicalTrade, reconcile_completed_trades
+from app.services.trade_ledger import reconcile_trade_ledger
 from app.storage import FileStorage
 
 
@@ -570,6 +571,13 @@ def commit_import(
         "reconciliation_warnings": list(dict.fromkeys(reconciliation_warnings)),
     }
     db.flush()
+    # One final account-wide pass makes old lot-pair rows obey the same flat ->
+    # position -> flat trade definition used by new imports and live ingestion.
+    ledger_report = reconcile_trade_ledger(db, account)
+    import_session.summary_json = {
+        **import_session.summary_json,
+        "ledger_reconciliation": ledger_report,
+    }
     # Newly imported canonical trades may resolve Companion captures recorded earlier.
     reconcile_unmatched_captures(db, user.id, account_id=account.id)
     db.flush()

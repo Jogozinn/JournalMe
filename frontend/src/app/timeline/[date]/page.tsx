@@ -15,6 +15,20 @@ type Timeline = {
   trades: (Trade & { running_net_pnl: string; review: ReviewStatus })[];
   review: ReviewStatus;
   navigation: { previous: string | null; next: string | null };
+  activity: {
+    completed_trades: number;
+    orders_submitted: number;
+    orders_filled: number;
+    orders_canceled: number;
+    orders_rejected: number;
+    orders_other: number;
+    fill_count: number;
+    contracts_executed: string;
+    fees_paid: string | null;
+    gross_pnl: string;
+    net_pnl: string;
+    fees_complete: boolean;
+  };
   summary: {
     gross_pnl: string;
     fees: string | null;
@@ -171,6 +185,27 @@ export default function TimelinePage() {
         <div><span>Best trade</span><Pnl value={data.summary.best_trade?.net_pnl ?? null}>{data.summary.best_trade ? money(data.summary.best_trade.net_pnl) : "Unavailable"}</Pnl></div>
         <div><span>Worst trade</span><Pnl value={data.summary.worst_trade?.net_pnl ?? null}>{data.summary.worst_trade ? money(data.summary.worst_trade.net_pnl) : "Unavailable"}</Pnl></div>
         <div><span>Journal</span><strong className={`status-text ${data.review.status}`}>{data.review.status}</strong></div>
+      </section>
+
+      <section className="card" style={{ marginBottom: "1rem" }}>
+        <div className="section-title">
+          <div>
+            <p className="eyebrow">Execution ledger</p>
+            <h2>What actually happened</h2>
+          </div>
+          <span>{data.activity.completed_trades} completed trades</span>
+        </div>
+        <div className="session-summary" style={{ marginTop: "0.75rem" }}>
+          <div><span>Orders submitted</span><strong>{data.activity.orders_submitted}</strong></div>
+          <div><span>Filled orders</span><strong>{data.activity.orders_filled}</strong></div>
+          <div><span>Canceled</span><strong>{data.activity.orders_canceled}</strong></div>
+          <div><span>Rejected</span><strong>{data.activity.orders_rejected}</strong></div>
+          <div><span>Actual fills</span><strong>{data.activity.fill_count}</strong></div>
+          <div><span>Contracts executed</span><strong>{quantity(data.activity.contracts_executed)}</strong></div>
+          <div><span>Fees paid</span><strong>{money(data.activity.fees_paid)}</strong></div>
+          <div><span>Net result</span><Pnl value={data.activity.net_pnl}>{money(data.activity.net_pnl)}</Pnl></div>
+        </div>
+        <p className="muted" style={{ marginTop: "0.75rem" }}>Canceled and rejected orders are activity, not trades. Partial fills and partial exits stay inside the same flat-to-flat trade.</p>
       </section>
 
       <section className="timeline-layout premium-timeline-layout">

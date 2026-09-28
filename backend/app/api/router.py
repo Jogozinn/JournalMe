@@ -94,6 +94,7 @@ from app.services.prop_rules import (
     lucidflex_funded_50k_preset,
 )
 from app.services.review import day_review_status, review_rules, trade_review_statuses
+from app.services.trade_ledger import reconcile_trade_ledger, trading_activity_summary
 from app.services.push_notifications import (
     PushNotice,
     endpoint_hash,
@@ -605,6 +606,16 @@ def cancel_import(session_id: UUID, db: Db, user: CurrentUser) -> dict[str, str]
     return {"status": "canceled"}
 
 
+@router.post("/accounts/{account_id}/ledger/reconcile")
+def reconcile_account_ledger(
+    account_id: UUID, db: Db, user: CurrentUser
+) -> dict[str, Any]:
+    account = _account_or_404(db, user, account_id)
+    report = reconcile_trade_ledger(db, account)
+    db.commit()
+    return report
+
+
 @router.get("/trades")
 def list_trades(
     db: Db,
@@ -847,6 +858,9 @@ def session_timeline(
     total_fees = (
         sum((trade.fees or Decimal("0")) for trade in trades) if trades else Decimal("0")
     )
+    activity = trading_activity_summary(
+        db, account, start_at=day_start, end_at=day_end, trades=list(trades)
+    )
     return {
         "account": _account_dict(account),
         "trading_date": trading_date.isoformat(),
@@ -858,6 +872,7 @@ def session_timeline(
             review_rules(db, user.id),
         ),
         "navigation": _trading_day_navigation(db, account, trading_date),
+        "activity": activity,
         "summary": {
             "gross_pnl": _decimal(sum((trade.gross_pnl for trade in trades), Decimal("0"))),
             "fees": (

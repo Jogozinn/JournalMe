@@ -21,6 +21,8 @@ export default function DataSettingsPage() {
   const { account } = useAccount();
   const [status, setStatus] = useState<BackupStatus | null>(null);
   const [error, setError] = useState("");
+  const [reconciling, setReconciling] = useState(false);
+  const [ledgerResult, setLedgerResult] = useState<{ before_trade_rows: number; after_trade_rows: number; collapsed_trade_rows: number; repaired_groups: number; conflicts: unknown[]; status: string } | null>(null);
   useEffect(() => {
     api<BackupStatus>("/backup-status")
       .then(setStatus)
@@ -34,6 +36,31 @@ export default function DataSettingsPage() {
         <article className="card export-card"><p className="eyebrow">Current account</p><h2>Trades CSV</h2><p>Canonical and manual trade facts with Decimal values and visible source labels.</p><AuthenticatedDownloadLink className="button primary" disabled={!account} path={account ? `/exports/trades.csv?account_id=${account.id}` : ""} filename="journalme-trades.csv">Export trades</AuthenticatedDownloadLink></article>
         <article className="card export-card"><p className="eyebrow">Current account</p><h2>Journals JSON</h2><p>Trade journals and daily reviews with a versioned export envelope.</p><AuthenticatedDownloadLink className="button primary" disabled={!account} path={account ? `/exports/journals.json?account_id=${account.id}` : ""} filename="journalme-journals.json">Export journals</AuthenticatedDownloadLink></article>
         <article className="card export-card"><p className="eyebrow">All user data</p><h2>Complete ZIP archive</h2><p>Accounts, trades, journals, playbooks, reviews, goals, audit events, and attachments.</p><AuthenticatedDownloadLink className="button primary" path="/exports/archive.zip" filename="journalme-backup.zip">Export full backup</AuthenticatedDownloadLink></article>
+      </section>
+      <section className="card backup-card">
+        <div className="section-title">
+          <div><p className="eyebrow">Canonical trade ledger</p><h2>Reconcile trade history</h2></div>
+          <button
+            className="button primary"
+            type="button"
+            disabled={!account || reconciling}
+            onClick={async () => {
+              if (!account) return;
+              setReconciling(true);
+              setError("");
+              try {
+                const result = await api<typeof ledgerResult>(`/accounts/${account.id}/ledger/reconcile`, { method: "POST" });
+                setLedgerResult(result);
+              } catch (reason) {
+                setError(reason instanceof Error ? reason.message : "Trade history could not be reconciled.");
+              } finally {
+                setReconciling(false);
+              }
+            }}
+          >{reconciling ? "Reconciling…" : "Reconcile history"}</button>
+        </div>
+        <p>Collapses legacy lot-pair duplicates into one flat → position → flat trade. Canceled and rejected orders remain in the audit trail but never count as trades.</p>
+        {ledgerResult && <p><strong>{ledgerResult.before_trade_rows} → {ledgerResult.after_trade_rows} trade rows.</strong> Collapsed {ledgerResult.collapsed_trade_rows} duplicates across {ledgerResult.repaired_groups} lifecycle groups. {ledgerResult.conflicts.length ? `${ledgerResult.conflicts.length} reviewed conflict(s) need attention.` : "No review conflicts."}</p>}
       </section>
       {!status ? <Skeleton rows={4} /> : <section className="card backup-card">
         <div className="section-title"><div><p className="eyebrow">{status.mode} backup status</p><h2>{status.status === "ready" ? "Ready to back up" : status.status}</h2></div><span>Schema v{status.export_schema_version}</span></div>
