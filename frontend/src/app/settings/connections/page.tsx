@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAccount } from "@/components/account-provider";
 import { ErrorState, PageHeader, Skeleton } from "@/components/ui";
-import { API_BASE_URL, api } from "@/lib/api";
+import { API_BASE_URL, api, dateTime } from "@/lib/api";
 import styles from "./connections.module.css";
 
 type BrokerConnection = {
@@ -31,7 +31,7 @@ type IssuedBridgeToken = {
 };
 
 function timeLabel(value: string | null) {
-  return value ? new Date(value).toLocaleString() : "Never";
+  return value ? dateTime(value) : "Never";
 }
 
 export default function ConnectionsPage() {

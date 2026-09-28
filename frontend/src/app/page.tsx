@@ -9,6 +9,7 @@ import { useAccount } from "@/components/account-provider";
 import { Icon } from "@/components/icons";
 import { EmptyState, ErrorState, PageHeader, Pnl, Skeleton } from "@/components/ui";
 import { api, dateTime, money, percent, quantity } from "@/lib/api";
+import { buildLearningNotices, type LearningOverview } from "@/lib/learning";
 import type { Metrics, Trade } from "@/lib/types";
 
 const EquityChart = dynamic(() => import("@/components/equity-chart"), {
@@ -141,6 +142,7 @@ export default function HomePage() {
   const [days, setDays] = useState<DaySummary[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
   const [prop, setProp] = useState<Record<string, unknown> | null>(null);
+  const [learning, setLearning] = useState<LearningOverview | null>(null);
   const [period, setPeriod] = useState("all");
   const [customStart, setCustomStart] = useState(
     `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, "0")}-01`,
@@ -163,7 +165,8 @@ export default function HomePage() {
       api<{ items: DaySummary[] }>(`/trading-days?account_id=${account.id}&page_size=60`),
       api<Goal[]>(`/goals?account_id=${account.id}`),
       api<Record<string, unknown> | null>(`/prop-rules/${account.id}/status`),
-    ]).then(([dashboard, queue, tradingDays, nextGoals, propStatus]) => {
+      api<LearningOverview>(`/intelligence/overview?current_account_id=${account.id}`),
+    ]).then(([dashboard, queue, tradingDays, nextGoals, propStatus, learningResult]) => {
       if (dashboard.status === "rejected") {
         setError(dashboard.reason instanceof Error ? dashboard.reason.message : "Dashboard could not be loaded.");
         return;
@@ -173,6 +176,7 @@ export default function HomePage() {
       setDays(tradingDays.status === "fulfilled" ? tradingDays.value.items : []);
       setGoals(nextGoals.status === "fulfilled" ? nextGoals.value : []);
       setProp(propStatus.status === "fulfilled" ? propStatus.value : null);
+      setLearning(learningResult.status === "fulfilled" ? learningResult.value : null);
     });
   }, [account, period, customEnd, customStart]);
   useEffect(() => {
@@ -217,6 +221,7 @@ export default function HomePage() {
     qualifying_day_required?: number | null;
     eligible_for_payout?: boolean;
   } | null;
+  const learningNotices = buildLearningNotices(learning, review).filter((item) => item.kind !== "review").slice(0, 2);
   return (
     <>
       <PageHeader
@@ -378,10 +383,23 @@ export default function HomePage() {
                 <h2>{money(propPayout?.cycle_net_profit ?? propStatus.net_profit)} cycle profit</h2>
                 <p>{propPayout ? `${propPayout.qualifying_day_count ?? 0} / ${propPayout.qualifying_day_required ?? "Not available"} qualifying profit days · ${propPayout.eligible_for_payout ? "Payout eligible" : "In progress"}` : `${money(propStatus.profit_remaining)} remaining · ${propStatus.estimated_pass ? "Estimated rules met" : "In progress"}`}. Verify against your firm agreement.</p>
               </article>}
-              <article className="card insight-card">
-                <p className="eyebrow">Stored-data reminder</p>
-                <h2>Latest reminder</h2>
-                <p>{data.latest_insight ?? "Keep journaling. A useful pattern needs a little more history."}</p>
+              <article className="card insight-card learning-home-card">
+                <div className="section-title">
+                  <div><p className="eyebrow">JournalMe noticed</p><h2>{learningNotices.length ? "What your data is starting to say" : "Still learning your patterns"}</h2></div>
+                  <Link href="/intelligence">See evidence</Link>
+                </div>
+                {learningNotices.length ? (
+                  <div className="learning-home-list">
+                    {learningNotices.map((notice) => (
+                      <Link href={notice.href} key={notice.key}>
+                        <strong>{notice.title}</strong>
+                        <span>{notice.body}</span>
+                      </Link>
+                    ))}
+                  </div>
+                ) : (
+                  <p>{data.latest_insight ?? "Keep journaling. JournalMe will surface a reminder when repeated evidence becomes useful."}</p>
+                )}
               </article>
             </div>
           </section>

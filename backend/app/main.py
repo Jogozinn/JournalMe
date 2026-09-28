@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -16,6 +18,9 @@ from app.config import get_settings
 from app.database import SessionLocal
 from app.models import User
 from app.seed import seed_default_tags, seed_starter_playbooks
+from app.services.push_notifications import push_configured, run_push_notification_tick
+
+logger = logging.getLogger(__name__)
 
 
 def upgrade_database() -> None:
@@ -25,6 +30,19 @@ def upgrade_database() -> None:
         "script_location", str(backend_root / "alembic")
     )
     command.upgrade(alembic_config, "head")
+
+
+async def _push_loop() -> None:
+    settings = get_settings()
+    interval = max(60, settings.push_interval_seconds)
+    while True:
+        try:
+            await asyncio.to_thread(run_push_notification_tick, settings=settings)
+        except Exception:
+            # Push is supplemental. A transient provider/configuration failure must
+            # never take down JournalMe or its broker ingestion path.
+            logger.exception("JournalMe push scheduler tick failed")
+        await asyncio.sleep(interval)
 
 
 @asynccontextmanager
@@ -42,7 +60,16 @@ async def lifespan(_: FastAPI):
         seed_default_tags(db, user)
         seed_starter_playbooks(db, user)
         db.commit()
-    yield
+    push_task = asyncio.create_task(_push_loop()) if push_configured(settings) else None
+    try:
+        yield
+    finally:
+        if push_task is not None:
+            push_task.cancel()
+            try:
+                await push_task
+            except asyncio.CancelledError:
+                pass
 
 
 settings = get_settings()

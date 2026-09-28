@@ -28,6 +28,11 @@ class Settings(BaseModel):
         "JOURNALME_LOCAL_USER_EMAIL", "trader@journalme.local"
     )
     local_user_name: str = os.getenv("JOURNALME_LOCAL_USER_NAME", "Trader")
+    vapid_public_key: str | None = os.getenv("JOURNALME_VAPID_PUBLIC_KEY")
+    vapid_private_key: str | None = os.getenv("JOURNALME_VAPID_PRIVATE_KEY")
+    vapid_private_key_b64: str | None = os.getenv("JOURNALME_VAPID_PRIVATE_KEY_B64")
+    vapid_subject: str | None = os.getenv("JOURNALME_VAPID_SUBJECT")
+    push_interval_seconds: int = int(os.getenv("JOURNALME_PUSH_INTERVAL_SECONDS", "900"))
 
     @model_validator(mode="after")
     def validate_supported_providers(self) -> "Settings":

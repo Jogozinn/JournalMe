@@ -8,6 +8,7 @@ import { AccountProvider, useAccount } from "@/components/account-provider";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
 import { BrandMark } from "@/components/brand-mark";
 import { BrokerLiveActivity } from "@/components/broker-live-activity";
+import { LearningNotifications } from "@/components/learning-notifications";
 import { CommandPalette } from "@/components/command-palette";
 import { Icon, type IconName } from "@/components/icons";
 import { money } from "@/lib/api";
@@ -257,6 +258,7 @@ function ShellContent({ children }: { children: React.ReactNode }) {
         <main><div className="route-view" key={pathname}>{children}</div></main>
       </div>
       <CommandPalette />
+      <LearningNotifications />
       <BrokerLiveActivity />
       <nav className="bottom-nav" aria-label="Mobile navigation">
         {[nav[0], nav[1]].map((item) => (

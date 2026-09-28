@@ -19,7 +19,8 @@ export type IconName =
   | "arrow"
   | "search"
   | "menu"
-  | "panel";
+  | "panel"
+  | "notification";
 
 const paths: Record<IconName, React.ReactNode> = {
   home: <><path d="m3 11 9-8 9 8" /><path d="M5 10v10h14V10M9 20v-6h6v6" /></>,
@@ -41,6 +42,7 @@ const paths: Record<IconName, React.ReactNode> = {
   search: <><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></>,
   menu: <><path d="M4 7h16M4 12h16M4 17h16" /></>,
   panel: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16M14 9l3 3-3 3" /></>,
+  notification: <><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" /><path d="M10 21h4" /></>,
 };
 
 export function Icon({

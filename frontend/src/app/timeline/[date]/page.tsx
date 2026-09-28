@@ -6,7 +6,7 @@ import { useParams } from "next/navigation";
 
 import { useAccount } from "@/components/account-provider";
 import { EmptyState, ErrorState, PageHeader, Pnl, Skeleton } from "@/components/ui";
-import { api, duration, money, percent, quantity } from "@/lib/api";
+import { api, duration, money, percent, quantity, timeOnly } from "@/lib/api";
 import type { Playbook, ReviewStatus, Trade } from "@/lib/types";
 
 type Timeline = {
@@ -190,7 +190,7 @@ export default function TimelinePage() {
                       key={trade.id}
                       type="button"
                       className={index < replayIndex ? "revealed" : index === replayIndex && replay ? "current" : ""}
-                      aria-label={`Open ${trade.symbol} at ${new Date(trade.entry_timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`}
+                      aria-label={`Open ${trade.symbol} at ${timeOnly(trade.entry_timestamp)}`}
                       onClick={() => {
                         setReplay(true);
                         setReplayIndex(index);
@@ -226,8 +226,8 @@ export default function TimelinePage() {
             <Link href={`/trades/${trade.id}`} className={`timeline-event trade-event card ${replay && trade.id === replayTrade?.id ? "replay-current" : ""}`} key={trade.id}>
               <span className="timeline-dot" />
               <div className="event-time">
-                <strong>{new Date(trade.entry_timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</strong>
-                <span>to {new Date(trade.exit_timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
+                <strong>{timeOnly(trade.entry_timestamp)}</strong>
+                <span>to {timeOnly(trade.exit_timestamp)}</span>
               </div>
               <div className="event-main">
                 <div><strong>{trade.symbol}</strong><span className={`side-token ${trade.side}`}>{trade.side}</span></div>

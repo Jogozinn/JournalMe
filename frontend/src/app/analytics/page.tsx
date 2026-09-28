@@ -5,7 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useAccount } from "@/components/account-provider";
 import { AuthenticatedDownloadLink } from "@/components/authenticated-assets";
 import { EmptyState, ErrorState, PageHeader, Pnl, Skeleton } from "@/components/ui";
-import { api, money, percent } from "@/lib/api";
+import { api, hourLabel12, money, percent } from "@/lib/api";
 import type { Metrics } from "@/lib/types";
 
 type Group = { label: string; net_pnl: string; trade_count: number; win_rate: string | null; expectancy: string | null };
@@ -119,7 +119,7 @@ export default function AnalyticsPage() {
     const highSide = extreme(data.by_side, "high");
     return [
       highDay && { label: "Highest net weekday", value: highDay.label, detail: `${money(highDay.net_pnl)} across ${highDay.trade_count} trades`, tone: Number(highDay.net_pnl) >= 0 ? "positive" : "negative" },
-      lowHour && { label: "Lowest net entry hour", value: lowHour.label, detail: `${money(lowHour.net_pnl)} across ${lowHour.trade_count} trades`, tone: Number(lowHour.net_pnl) >= 0 ? "positive" : "negative" },
+      lowHour && { label: "Lowest net entry hour", value: hourLabel12(lowHour.label), detail: `${money(lowHour.net_pnl)} across ${lowHour.trade_count} trades`, tone: Number(lowHour.net_pnl) >= 0 ? "positive" : "negative" },
       highSide && { label: "Higher net side", value: highSide.label, detail: `${money(highSide.net_pnl)} · ${percent(highSide.win_rate)} win rate`, tone: Number(highSide.net_pnl) >= 0 ? "positive" : "negative" },
     ].filter(Boolean) as { label: string; value: string; detail: string; tone: string }[];
   }, [data]);
@@ -168,7 +168,7 @@ export default function AnalyticsPage() {
       </section>
 
       <section className="analytics-grid premium-analytics-grid">
-        <PerformanceBars title="By entry hour" eyebrow="Timing" rows={data.by_hour} />
+        <PerformanceBars title="By entry hour" eyebrow="Timing" rows={data.by_hour.map((row) => ({ ...row, label: hourLabel12(row.label) }))} />
         <PerformanceBars title="By weekday" eyebrow="Rhythm" rows={data.by_weekday} limit={7} />
         <PerformanceTable title="Long vs short" rows={data.by_side} />
         <PerformanceTable title="By root symbol" rows={data.by_root_symbol} />

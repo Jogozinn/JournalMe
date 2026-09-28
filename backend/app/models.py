@@ -1087,6 +1087,56 @@ class ManualAdjustment(Base):
     )
 
 
+class PushSubscription(Base):
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    subscription_hash: Mapped[str] = mapped_column(String(64))
+    endpoint: Mapped[str] = mapped_column(Text)
+    p256dh: Mapped[str] = mapped_column(Text)
+    auth: Mapped[str] = mapped_column(Text)
+    user_agent: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    device_label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "subscription_hash", name="uq_push_subscription_user_endpoint"
+        ),
+    )
+
+
+class NotificationDelivery(Base):
+    __tablename__ = "notification_deliveries"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    account_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("trading_accounts.id", ondelete="SET NULL"), nullable=True
+    )
+    notice_key: Mapped[str] = mapped_column(String(220))
+    kind: Mapped[str] = mapped_column(String(40))
+    title: Mapped[str] = mapped_column(String(240))
+    body: Mapped[str] = mapped_column(Text)
+    target_url: Mapped[str] = mapped_column(String(500))
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "notice_key", name="uq_notification_delivery_notice"),
+    )
+
+
 class UserPreference(Base):
     __tablename__ = "user_preferences"
 
@@ -1105,6 +1155,7 @@ class UserPreference(Base):
     reduced_motion: Mapped[bool] = mapped_column(Boolean, default=False)
     session_definitions_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     review_rules_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    notification_preferences_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

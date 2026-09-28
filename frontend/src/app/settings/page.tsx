@@ -4,6 +4,7 @@ import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 
 import { useAccount } from "@/components/account-provider";
+import { PushNotificationSettings } from "@/components/push-notification-settings";
 import { ErrorState, PageHeader, Skeleton } from "@/components/ui";
 import { api } from "@/lib/api";
 
@@ -83,6 +84,7 @@ export default function SettingsPage() {
         <div className="notice"><strong>Default completion rules</strong><p>Trade: thesis, entry reason, exit reason, lesson, grade, followed-plan answer, primary playbook, a tag, and required checklist answers. Day: reflection, next-session focus, grade, followed-rules answer, and complete trade reviews.</p></div>
         <button className="button primary">Save preferences</button>
       </form>}
+      <PushNotificationSettings />
     </>
   );
 }

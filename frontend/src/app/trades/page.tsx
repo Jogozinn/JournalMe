@@ -119,7 +119,7 @@ export default function TradesPage() {
             {trades.map((trade, index) => (
               <button className="trade-row trade-row-button" type="button" onClick={() => setSelectedIndex(index)} key={trade.id}>
                 <span><strong>{trade.symbol}</strong><small>{trade.source === "manual" ? "Manual source" : trade.journaled ? "Journal started" : "Needs review"}</small></span>
-                <span>{new Date(trade.entry_timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
+                <span>{dateTime(trade.entry_timestamp, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</span>
                 <span><i className={`side-token ${trade.side}`}>{trade.side}</i></span>
                 <span className="mono">{quantity(trade.quantity)}</span>
                 <span>{duration(trade.duration_seconds)}</span>

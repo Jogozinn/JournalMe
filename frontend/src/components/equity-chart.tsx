@@ -10,7 +10,7 @@ import {
   YAxis,
 } from "recharts";
 
-import { money } from "@/lib/api";
+import { dateTime, money } from "@/lib/api";
 
 export default function EquityChart({
   points,
@@ -37,7 +37,7 @@ export default function EquityChart({
             borderRadius: 10,
           }}
           formatter={(value) => money(String(value))}
-          labelFormatter={(label) => new Date(String(label)).toLocaleString()}
+          labelFormatter={(label) => dateTime(String(label))}
         />
         <Area
           type="monotone"

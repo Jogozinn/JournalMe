@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useAccount } from "@/components/account-provider";
-import { api, money, price, quantity } from "@/lib/api";
+import { api, money, price, quantity, timeOnly } from "@/lib/api";
 import type { Trade } from "@/lib/types";
 
 type BrokerConnection = {
@@ -72,11 +72,7 @@ function stateLabel(state: LiveState): string {
 }
 
 function eventTime(value: string): string {
-  return new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(value));
+  return timeOnly(value, { second: "2-digit" });
 }
 
 function EventSummary({ event, compact = false }: { event: BrokerActivityEvent; compact?: boolean }) {

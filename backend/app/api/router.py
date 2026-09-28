@@ -6,7 +6,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
@@ -32,6 +32,8 @@ from app.models import (
     ImportStatus,
     Order,
     Playbook,
+    PushSubscription,
+    UserPreference,
     PropRuleProfile,
     PropRuleProfileVersion,
     Tag,
@@ -54,6 +56,9 @@ from app.schemas import (
     GoalUpdate,
     PropPresetApply,
     PropRuleUpdate,
+    PushPreferencesUpdate,
+    PushSubscriptionCreate,
+    PushSubscriptionDelete,
     TagCreate,
     TagUpdate,
     TradeJournalUpdate,
@@ -89,6 +94,13 @@ from app.services.prop_rules import (
     lucidflex_funded_50k_preset,
 )
 from app.services.review import day_review_status, review_rules, trade_review_statuses
+from app.services.push_notifications import (
+    PushNotice,
+    endpoint_hash,
+    merged_push_preferences,
+    push_configured,
+    send_push_to_user,
+)
 from app.storage import StorageProvider, get_storage_provider
 
 router = APIRouter()
@@ -1149,6 +1161,140 @@ def intelligence_overview(
         journals,
         current_account_id=current_account_id,
     )
+
+
+@router.get("/push/config")
+def push_config(user: CurrentUser) -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "enabled": push_configured(settings),
+        "vapid_public_key": settings.vapid_public_key if push_configured(settings) else None,
+    }
+
+
+@router.get("/push/preferences")
+def push_preferences(db: Db, user: CurrentUser) -> dict[str, Any]:
+    item = db.get(UserPreference, user.id)
+    active_subscriptions = db.scalar(
+        select(func.count(PushSubscription.id)).where(
+            PushSubscription.user_id == user.id,
+            PushSubscription.enabled.is_(True),
+        )
+    ) or 0
+    return {
+        **merged_push_preferences(item),
+        "active_subscriptions": int(active_subscriptions),
+    }
+
+
+@router.put("/push/preferences")
+def update_push_preferences(
+    payload: PushPreferencesUpdate, db: Db, user: CurrentUser
+) -> dict[str, Any]:
+    item = db.get(UserPreference, user.id)
+    if item is None:
+        item = UserPreference(user_id=user.id)
+        db.add(item)
+    merged = merged_push_preferences(item)
+    merged.update(payload.model_dump(exclude_unset=True))
+    item.notification_preferences_json = merged
+    db.commit()
+    active_subscriptions = db.scalar(
+        select(func.count(PushSubscription.id)).where(
+            PushSubscription.user_id == user.id,
+            PushSubscription.enabled.is_(True),
+        )
+    ) or 0
+    return {**merged, "active_subscriptions": int(active_subscriptions)}
+
+
+@router.post("/push/subscriptions", status_code=status.HTTP_201_CREATED)
+def register_push_subscription(
+    payload: PushSubscriptionCreate, db: Db, user: CurrentUser
+) -> dict[str, Any]:
+    settings = get_settings()
+    if not push_configured(settings):
+        raise HTTPException(status_code=503, detail="Background push is not configured on this deployment.")
+    fingerprint = endpoint_hash(payload.endpoint)
+    item = db.scalar(
+        select(PushSubscription).where(
+            PushSubscription.user_id == user.id,
+            PushSubscription.subscription_hash == fingerprint,
+        )
+    )
+    if item is None:
+        item = PushSubscription(
+            user_id=user.id,
+            subscription_hash=fingerprint,
+            endpoint=payload.endpoint,
+            p256dh=payload.keys.p256dh,
+            auth=payload.keys.auth,
+            user_agent=payload.user_agent,
+            device_label=payload.device_label,
+        )
+        db.add(item)
+    else:
+        item.endpoint = payload.endpoint
+        item.p256dh = payload.keys.p256dh
+        item.auth = payload.keys.auth
+        item.user_agent = payload.user_agent
+        item.device_label = payload.device_label
+        item.enabled = True
+    item.last_seen_at = datetime.now(timezone.utc)
+    preference = db.get(UserPreference, user.id)
+    if preference is None:
+        preference = UserPreference(user_id=user.id)
+        db.add(preference)
+    merged = merged_push_preferences(preference)
+    merged["enabled"] = True
+    preference.notification_preferences_json = merged
+    db.commit()
+    return {
+        "id": str(item.id),
+        "enabled": item.enabled,
+        "device_label": item.device_label,
+        "created_at": _timestamp(item.created_at),
+    }
+
+
+@router.delete("/push/subscriptions", status_code=status.HTTP_204_NO_CONTENT)
+def remove_push_subscription(
+    payload: PushSubscriptionDelete, db: Db, user: CurrentUser
+) -> Response:
+    fingerprint = endpoint_hash(payload.endpoint)
+    item = db.scalar(
+        select(PushSubscription).where(
+            PushSubscription.user_id == user.id,
+            PushSubscription.subscription_hash == fingerprint,
+        )
+    )
+    if item is not None:
+        item.enabled = False
+        db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/push/test")
+def test_push_notification(db: Db, user: CurrentUser) -> dict[str, Any]:
+    settings = get_settings()
+    if not push_configured(settings):
+        raise HTTPException(status_code=503, detail="Background push is not configured on this deployment.")
+    result = send_push_to_user(
+        db,
+        user.id,
+        PushNotice(
+            key=f"test:{uuid4()}",
+            kind="test",
+            title="JournalMe notifications are on",
+            body="This device can receive JournalMe reminders even when the app is closed.",
+            url="/settings#notifications",
+        ),
+        settings=settings,
+        record_delivery=False,
+    )
+    if result["sent"] == 0:
+        raise HTTPException(status_code=409, detail="No active push subscription could be reached.")
+    return result
 
 
 def _broker_connection_or_404(

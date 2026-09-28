@@ -6,7 +6,7 @@ import { useParams } from "next/navigation";
 
 import { useAccount } from "@/components/account-provider";
 import { ErrorState, PageHeader, Pnl, Skeleton } from "@/components/ui";
-import { api, money } from "@/lib/api";
+import { api, dateTime, money } from "@/lib/api";
 import {
   applicable,
   cleanDecimalInput,
@@ -519,7 +519,7 @@ export default function AccountDetailPage() {
       <section className="card settings-panel manual-adjustments">
         <div className="section-title"><div><p className="eyebrow">Audited financial notes</p><h2>Manual adjustments</h2></div><span>{adjustments.length} recorded</span></div>
         <p className="muted">Deposits, withdrawals, and corrections stay separate from imported history and create an audit event.</p>
-        {!!adjustments.length && <div className="group-list">{adjustments.map((item) => <div key={item.id}><strong>{item.adjustment_type.replaceAll("_", " ")} · {item.status}</strong><Pnl value={item.amount}>{money(item.amount)}</Pnl><small>{new Date(item.effective_at).toLocaleString()} · {item.reason}</small>{item.status === "pending" && <button className="button" disabled={saving} onClick={() => void approveAdjustment(item.id)}>Approve adjustment</button>}</div>)}</div>}
+        {!!adjustments.length && <div className="group-list">{adjustments.map((item) => <div key={item.id}><strong>{item.adjustment_type.replaceAll("_", " ")} · {item.status}</strong><Pnl value={item.amount}>{money(item.amount)}</Pnl><small>{dateTime(item.effective_at)} · {item.reason}</small>{item.status === "pending" && <button className="button" disabled={saving} onClick={() => void approveAdjustment(item.id)}>Approve adjustment</button>}</div>)}</div>}
         <form className="form-grid" onSubmit={addAdjustment}>
           <div className="field"><label htmlFor="adjustment_type">Type</label><select id="adjustment_type" name="adjustment_type"><option value="deposit">Deposit</option><option value="withdrawal">Withdrawal</option><option value="fee_correction">Fee correction</option><option value="account_correction">Account correction</option></select></div>
           <div className="field"><label htmlFor="adjustment_amount">Amount</label><input id="adjustment_amount" name="amount" inputMode="decimal" required /></div>

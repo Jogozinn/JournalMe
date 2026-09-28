@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { api, duration, errorMessage, money, percent, quantity } from "@/lib/api";
+import { api, duration, errorMessage, hourLabel12, money, percent, quantity, timeOnly } from "@/lib/api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -24,6 +24,12 @@ describe("financial presentation", () => {
     expect(quantity("4.000000", true)).toBe("4 contracts");
     expect(quantity("1.25", true)).toBe("1.25 contracts");
     expect(quantity(null)).toBe("Unavailable");
+  });
+
+  it("uses 12-hour labels for trading times", () => {
+    expect(hourLabel12("00:00")).toBe("12:00 AM");
+    expect(hourLabel12("13:00")).toBe("1:00 PM");
+    expect(timeOnly(new Date(2026, 8, 28, 21, 5))).toContain("9:05 PM");
   });
 });
 

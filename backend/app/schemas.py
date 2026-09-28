@@ -379,6 +379,35 @@ class AccountGroupCreate(BaseModel):
     account_ids: list[UUID] = Field(default_factory=list, max_length=100)
 
 
+class PushSubscriptionKeys(BaseModel):
+    p256dh: str = Field(min_length=1, max_length=500)
+    auth: str = Field(min_length=1, max_length=500)
+
+
+class PushSubscriptionCreate(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=5000)
+    keys: PushSubscriptionKeys
+    device_label: str | None = Field(default=None, max_length=120)
+    user_agent: str | None = Field(default=None, max_length=500)
+
+
+class PushSubscriptionDelete(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=5000)
+
+
+class PushPreferencesUpdate(BaseModel):
+    enabled: bool | None = None
+    patterns: bool | None = None
+    mindset: bool | None = None
+    review_reminders: bool | None = None
+    daily_cue: bool | None = None
+    daily_cue_time: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    review_reminder_time: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    quiet_hours_enabled: bool | None = None
+    quiet_hours_start: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    quiet_hours_end: str | None = Field(default=None, pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
 class UserPreferenceUpdate(BaseModel):
     timezone: str | None = Field(default=None, max_length=80)
     currency: str | None = Field(default=None, min_length=3, max_length=3)
@@ -390,6 +419,7 @@ class UserPreferenceUpdate(BaseModel):
     reduced_motion: bool | None = None
     session_definitions_json: dict[str, object] | None = None
     review_rules_json: dict[str, object] | None = None
+    notification_preferences_json: dict[str, object] | None = None
 
 
 class ManualTradeCreate(BaseModel):

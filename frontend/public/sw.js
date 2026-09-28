@@ -1,4 +1,4 @@
-const CACHE = "journalme-static-v2";
+const CACHE = "journalme-static-v4";
 const STATIC = ["/icon.svg"];
 
 self.addEventListener("install", (event) => {
@@ -22,9 +22,6 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
   const url = new URL(event.request.url);
-
-  // Never cache application JS/CSS, Next route payloads, or API responses.
-  // JournalMe is online-first; stale executable chunks are worse than no cache.
   if (
     url.origin !== self.location.origin ||
     url.pathname.startsWith("/_next/") ||
@@ -33,10 +30,41 @@ self.addEventListener("fetch", (event) => {
   ) {
     return;
   }
-
   if (url.pathname === "/icon.svg") {
-    event.respondWith(
-      caches.match(event.request).then((cached) => cached || fetch(event.request)),
-    );
+    event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request)));
   }
+});
+
+self.addEventListener("push", (event) => {
+  let payload = {};
+  try {
+    payload = event.data ? event.data.json() : {};
+  } catch {
+    payload = { body: event.data ? event.data.text() : "JournalMe has something new for you." };
+  }
+  const title = payload.title || "JournalMe";
+  event.waitUntil(
+    self.registration.showNotification(title, {
+      body: payload.body || "JournalMe has something new for you.",
+      icon: "/icon",
+      badge: "/icon",
+      tag: payload.tag || "journalme-learning",
+      data: { url: payload.url || "/intelligence", kind: payload.kind || "learning" },
+    }),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = new URL(event.notification.data?.url || "/intelligence", self.location.origin).href;
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
+      const existing = windows.find((client) => "focus" in client);
+      if (existing) {
+        existing.navigate(target);
+        return existing.focus();
+      }
+      return self.clients.openWindow(target);
+    }),
+  );
 });

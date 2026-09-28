@@ -28,7 +28,8 @@ function cacheTtl(path: string): number {
     path.startsWith("/intelligence") ||
     path.startsWith("/broker-connections") ||
     path.startsWith("/goals") ||
-    path.startsWith("/prop-rules")
+    path.startsWith("/prop-rules") ||
+    path.startsWith("/push")
   ) return 8_000;
   return 2_000;
 }
@@ -202,13 +203,43 @@ export function dateTime(
   value: string,
   options?: Intl.DateTimeFormatOptions,
 ): string {
-  return new Intl.DateTimeFormat("en-US", options ?? {
+  const resolved = options ?? {
     month: "short",
     day: "numeric",
     year: "numeric",
     hour: "numeric",
     minute: "2-digit",
+  };
+  const includesTime = Boolean(
+    resolved.timeStyle || resolved.hour || resolved.minute || resolved.second,
+  );
+  return new Intl.DateTimeFormat("en-US", {
+    ...resolved,
+    ...(includesTime ? { hour12: true } : {}),
   }).format(new Date(value));
+}
+
+export function timeOnly(
+  value: string | Date,
+  options: Intl.DateTimeFormatOptions = {},
+): string {
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    ...options,
+  }).format(typeof value === "string" ? new Date(value) : value);
+}
+
+export function hourLabel12(value: string): string {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
+  if (!match) return value;
+  const hour = Number(match[1]);
+  const minute = match[2];
+  if (hour < 0 || hour > 23) return value;
+  const suffix = hour >= 12 ? "PM" : "AM";
+  const displayHour = hour % 12 || 12;
+  return `${displayHour}:${minute} ${suffix}`;
 }
 
 export function price(value: string | number | null | undefined): string {
