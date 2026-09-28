@@ -8,8 +8,8 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: {
-    default: `${brand.name} to ${brand.tagline}`,
-    template: `%s to ${brand.name}`,
+    default: brand.name,
+    template: `%s | ${brand.name}`,
   },
   description: brand.description,
   applicationName: brand.name,

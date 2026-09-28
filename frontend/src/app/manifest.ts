@@ -4,7 +4,7 @@ import { brand } from "@/config/brand";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: `${brand.name} to ${brand.tagline}`,
+    name: brand.name,
     short_name: brand.shortName,
     description: brand.description,
     start_url: "/",
