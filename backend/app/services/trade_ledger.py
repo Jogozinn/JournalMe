@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.domain import TradeSide
 from app.models import (
     Attachment,
+    BrokerExecutionEvent,
     CaptureEvent,
     Fill,
     Order,
@@ -25,6 +26,7 @@ from app.models import (
     TradingAccount,
 )
 from app.services.instrument_identity import canonical_contract_key, root_symbol
+from app.services.broker_ingestion import reconstruct_round_trips
 
 
 PREFERRED_SOURCE_QUALITY = {
@@ -68,19 +70,57 @@ def _split_ids(value: str | None) -> set[str]:
     return {item.strip() for item in (value or "").split(",") if item.strip()}
 
 
-def trade_fill_ids(trade: Trade) -> set[str]:
-    ids = _split_ids(trade.external_buy_fill_id) | _split_ids(trade.external_sell_fill_id)
-    payload = trade.source_payload or {}
-    for key in ("fill_ids", "ledger_fill_ids", "execution_ids"):
+def _payload_ids(payload: dict[str, Any], keys: tuple[str, ...]) -> set[str]:
+    ids: set[str] = set()
+    for key in keys:
         values = payload.get(key)
         if isinstance(values, list):
             ids.update(str(value) for value in values if value)
+        elif isinstance(values, str) and values.strip():
+            ids.update(_split_ids(values))
+    return ids
+
+
+def trade_import_fill_ids(trade: Trade) -> set[str]:
+    """Tradovate/import fill identifiers only.
+
+    NinjaTrader execution IDs live in a different namespace and must never be
+    compared directly with Tradovate fill IDs.
+    """
+    ids = _split_ids(trade.external_buy_fill_id) | _split_ids(trade.external_sell_fill_id)
+    payload = trade.source_payload or {}
+    ids.update(_payload_ids(payload, ("fill_ids", "ledger_fill_ids")))
     tradovate = payload.get("tradovate_reconciliation")
     if isinstance(tradovate, dict):
-        values = tradovate.get("fill_ids")
-        if isinstance(values, list):
-            ids.update(str(value) for value in values if value)
+        ids.update(_payload_ids(tradovate, ("fill_ids", "ledger_fill_ids")))
+    # Older payloads can preserve raw performance rows instead of a top-level
+    # fill_ids list. Recover those IDs without depending on a historical schema.
+    paired_rows = payload.get("paired_rows")
+    if isinstance(paired_rows, list):
+        for row in paired_rows:
+            if not isinstance(row, dict):
+                continue
+            for key in ("buyFillId", "sellFillId", "Buy Fill ID", "Sell Fill ID", "fillId", "Fill ID"):
+                value = row.get(key)
+                if value:
+                    ids.add(str(value))
     return ids
+
+
+def trade_execution_ids(trade: Trade) -> set[str]:
+    """Live broker execution IDs only."""
+    payload = trade.source_payload or {}
+    ids = _payload_ids(payload, ("execution_ids", "broker_execution_ids"))
+    final_id = payload.get("final_execution_id")
+    if final_id:
+        ids.add(str(final_id))
+    return ids
+
+
+def trade_fill_ids(trade: Trade) -> set[str]:
+    # Backward-compatible union for diagnostics/scoring only. Reconciliation
+    # itself uses source-specific ID namespaces.
+    return trade_import_fill_ids(trade) | trade_execution_ids(trade)
 
 
 def _as_utc_naive(value: datetime) -> datetime:
@@ -167,6 +207,88 @@ def _reconstruct_fill_lifecycles(fills: list[Fill]) -> list[PersistedLifecycle]:
     return sorted(completed, key=lambda item: item.entry_timestamp)
 
 
+def _live_round_trips(db: Session, account: TradingAccount) -> list[Any]:
+    events = list(
+        db.scalars(
+            select(BrokerExecutionEvent)
+            .where(BrokerExecutionEvent.account_id == account.id)
+            .order_by(BrokerExecutionEvent.executed_at, BrokerExecutionEvent.created_at)
+        ).all()
+    )
+    grouped: dict[tuple[UUID, str], list[BrokerExecutionEvent]] = defaultdict(list)
+    for event in events:
+        grouped[(event.connection_id, canonical_contract_key(event.symbol, event.executed_at))].append(event)
+    trips: list[Any] = []
+    for grouped_events in grouped.values():
+        trips.extend(reconstruct_round_trips(grouped_events))
+    return sorted(trips, key=lambda item: item.entry_timestamp)
+
+
+def _trip_execution_ids(trip: Any) -> set[str]:
+    return {str(item.event.external_execution_id) for item in trip.slices if item.event.external_execution_id}
+
+
+def _repair_live_group(db: Session, group: list[Trade], trip: Any) -> tuple[int, dict[str, Any] | None]:
+    if not group:
+        return 0, None
+    content_rows = [row for row in group if _has_user_content(db, row.id)]
+    if len(content_rows) > 1:
+        return 0, {
+            "trade_ids": [str(item.id) for item in group],
+            "reason": "multiple_live_duplicate_rows_have_user_content",
+        }
+    execution_ids = _trip_execution_ids(trip)
+    target = max(
+        group,
+        key=lambda row: (
+            int(row in content_rows) * 1000
+            + int(trade_execution_ids(row) == execution_ids) * 500
+            + PREFERRED_SOURCE_QUALITY.get(row.source_quality, 0),
+            len(trade_execution_ids(row)),
+            str(row.id),
+        ),
+    )
+    target.symbol = trip.symbol
+    target.root_symbol = root_symbol(trip.symbol)
+    target.side = trip.side
+    target.contract_quantity = trip.quantity
+    target.entry_price = trip.entry_price
+    target.exit_price = trip.exit_price
+    target.entry_timestamp = trip.entry_timestamp
+    target.exit_timestamp = trip.exit_timestamp
+    target.duration_seconds = max(0, int((trip.exit_timestamp - trip.entry_timestamp).total_seconds()))
+    target.gross_pnl = trip.gross_pnl
+    target.fees = trip.fees
+    target.net_pnl = trip.net_pnl
+    target.currency = trip.currency
+    target.source_quality = "broker_live"
+    target.reconciliation_status = "reconciled" if trip.fees is not None else "live_fees_pending"
+    payload = dict(target.source_payload or {})
+    payload.update({
+        "source": "broker_live",
+        "execution_ids": sorted(execution_ids),
+        "ledger_canonical": True,
+        "canonical_contract": canonical_contract_key(trip.symbol, trip.entry_timestamp),
+        "point_value": str(trip.point_value),
+        "ledger_component_trade_ids": [str(row.id) for row in group],
+    })
+    target.source_payload = payload
+    collapsed = 0
+    for duplicate in list(group):
+        if duplicate.id == target.id:
+            continue
+        if _has_user_content(db, duplicate.id):
+            return collapsed, {
+                "trade_ids": [str(item.id) for item in group],
+                "reason": "live_duplicate_user_content_race",
+            }
+        _move_safe_relations(db, target, duplicate)
+        db.delete(duplicate)
+        collapsed += 1
+    db.flush()
+    return collapsed, None
+
+
 def _same_lifecycle_trade(left: Trade, right: Trade) -> bool:
     return _same_lifecycle_values(
         left,
@@ -217,8 +339,10 @@ def _has_user_content(db: Session, trade_id: UUID) -> bool:
     )
 
 
-def _target_score(trade: Trade, union_fill_ids: set[str], has_content: bool) -> tuple[int, int, str]:
-    fill_ids = trade_fill_ids(trade)
+def _target_score(
+    trade: Trade, union_fill_ids: set[str], has_content: bool, *, import_only: bool = False
+) -> tuple[int, int, str]:
+    fill_ids = trade_import_fill_ids(trade) if import_only else trade_fill_ids(trade)
     exact = int(bool(union_fill_ids) and fill_ids == union_fill_ids)
     return (
         int(has_content) * 1000 + exact * 500 + PREFERRED_SOURCE_QUALITY.get(trade.source_quality, 0),
@@ -266,15 +390,23 @@ def _repair_group(
         }
 
     union_ids: set[str] = set()
-    for row in group:
-        union_ids.update(trade_fill_ids(row))
     if lifecycle is not None:
+        # This repair pass is anchored to Tradovate/import fills. Keep live
+        # execution IDs out of the imported fill namespace.
+        for row in group:
+            union_ids.update(trade_import_fill_ids(row))
         union_ids.update(lifecycle.fill_ids)
+    else:
+        for row in group:
+            union_ids.update(trade_fill_ids(row))
 
-    target = max(group, key=lambda row: _target_score(row, union_ids, row in content_rows))
-    exact_canonical = bool(union_ids) and trade_fill_ids(target) == union_ids
-
-    if lifecycle is not None and not exact_canonical:
+    target = max(
+        group,
+        key=lambda row: _target_score(
+            row, union_ids, row in content_rows, import_only=lifecycle is not None
+        ),
+    )
+    if lifecycle is not None:
         # Old paired-report rows are lot accounting, not JournalMe trades. The
         # persisted fills provide the authoritative flat-to-flat boundaries.
         target.symbol = lifecycle.symbol
@@ -292,14 +424,14 @@ def _repair_group(
         component_rows = [
             row
             for row in group
-            if trade_fill_ids(row) and trade_fill_ids(row).issubset(lifecycle.fill_ids)
+            if trade_import_fill_ids(row) and trade_import_fill_ids(row).issubset(lifecycle.fill_ids)
             and row.source_quality not in {"broker_live", "multi_source_reconciled", "ledger_reconciled", "fills_lifecycle"}
         ]
         canonical_financial = next(
             (
                 row
                 for row in group
-                if trade_fill_ids(row) == lifecycle.fill_ids
+                if trade_import_fill_ids(row) == lifecycle.fill_ids
                 or row.source_quality in {"multi_source_reconciled", "ledger_reconciled", "fills_lifecycle"}
             ),
             None,
@@ -366,13 +498,63 @@ def reconcile_trade_ledger(db: Session, account: TradingAccount) -> dict[str, An
     repaired_groups = 0
     conflicts: list[dict[str, Any]] = []
 
+    # First normalize the live-broker namespace from the raw execution stream.
+    # A NinjaTrader execution ID is not a Tradovate fill ID; treating them as the
+    # same namespace was the reason old live partial/position rows survived the
+    # first repair pass.
+    live_trips = _live_round_trips(db, account)
+    for trip in live_trips:
+        execution_ids = _trip_execution_ids(trip)
+        group = [
+            trade for trade in active
+            if trade.id not in used_trade_ids
+            and trade_execution_ids(trade)
+            and trade_execution_ids(trade).issubset(execution_ids)
+        ]
+        if not group:
+            group = [
+                trade for trade in active
+                if trade.id not in used_trade_ids
+                and trade.source_quality == "broker_live"
+                and _same_lifecycle_values(
+                    trade,
+                    symbol=trip.symbol,
+                    side=trip.side,
+                    quantity=trip.quantity,
+                    entry_price=trip.entry_price,
+                    exit_price=trip.exit_price,
+                    entry_timestamp=trip.entry_timestamp,
+                    exit_timestamp=trip.exit_timestamp,
+                )
+            ]
+        if not group:
+            continue
+        used_trade_ids.update(trade.id for trade in group)
+        count, conflict = _repair_live_group(db, group, trip)
+        collapsed += count
+        repaired_groups += int(count > 0 or len(group) == 1)
+        if conflict:
+            conflicts.append(conflict)
+
+    # Remove deleted ORM objects from the in-memory candidate list before the
+    # import-source pass. A live canonical row is allowed to participate again
+    # so Tradovate can enrich it with fees.
+    active = [row for row in active if db.get(Trade, row.id) is not None]
+    used_trade_ids.clear()
     for lifecycle in lifecycles:
         fill_components = [
             trade
             for trade in active
             if trade.id not in used_trade_ids
-            and trade_fill_ids(trade)
-            and trade_fill_ids(trade).issubset(lifecycle.fill_ids)
+            and trade_import_fill_ids(trade)
+            and trade_import_fill_ids(trade).issubset(lifecycle.fill_ids)
+        ]
+        linked_trade_ids = {
+            item.fill.trade_id for item in lifecycle.slices if item.fill.trade_id is not None
+        }
+        linked_trades = [
+            trade for trade in active
+            if trade.id not in used_trade_ids and trade.id in linked_trade_ids
         ]
         lifecycle_matches = [
             trade
@@ -389,11 +571,11 @@ def reconcile_trade_ledger(db: Session, account: TradingAccount) -> dict[str, An
                 exit_timestamp=lifecycle.exit_timestamp,
             )
         ]
-        group = list({trade.id: trade for trade in [*fill_components, *lifecycle_matches]}.values())
+        group = list({trade.id: trade for trade in [*linked_trades, *fill_components, *lifecycle_matches]}.values())
         if not group:
             continue
         used_trade_ids.update(trade.id for trade in group)
-        if len(group) > 1 or not any(trade_fill_ids(row) == lifecycle.fill_ids for row in group):
+        if len(group) > 1 or not any(trade_import_fill_ids(row) == lifecycle.fill_ids for row in group):
             count, conflict = _repair_group(db, group, lifecycle=lifecycle)
             collapsed += count
             repaired_groups += int(count > 0)
@@ -425,16 +607,24 @@ def reconcile_trade_ledger(db: Session, account: TradingAccount) -> dict[str, An
             if conflict:
                 conflicts.append(conflict)
 
-    remaining_ids = list(db.scalars(select(Trade.id).where(Trade.account_id == account.id)).all())
+    remaining_rows = list(db.scalars(select(Trade).where(Trade.account_id == account.id)).all())
+    unresolved_nonmanual = [
+        row for row in remaining_rows
+        if row.source_quality != "manual"
+        and not (row.source_payload or {}).get("ledger_canonical")
+        and row.source_quality not in {"multi_source_reconciled", "ledger_reconciled"}
+    ]
     return {
         "account_id": str(account.id),
         "before_trade_rows": before,
-        "after_trade_rows": len(remaining_ids),
+        "after_trade_rows": len(remaining_rows),
         "collapsed_trade_rows": collapsed,
         "repaired_groups": repaired_groups,
         "fill_lifecycles": len(lifecycles),
+        "live_lifecycles": len(live_trips),
+        "unresolved_nonmanual_trade_rows": len(unresolved_nonmanual),
         "conflicts": conflicts,
-        "status": "needs_attention" if conflicts else "reconciled",
+        "status": "needs_attention" if conflicts or unresolved_nonmanual else "reconciled",
     }
 
 
