@@ -139,10 +139,10 @@ def send_push_to_user(
     *,
     settings: Settings | None = None,
     record_delivery: bool = True,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     settings = settings or get_settings()
     if not push_configured(settings):
-        return {"sent": 0, "failed": 0, "disabled": 0}
+        return {"sent": 0, "failed": 0, "disabled": 0, "subscriptions": 0, "errors": []}
     delivery: NotificationDelivery | None = None
     if record_delivery:
         existing = db.scalar(
@@ -152,7 +152,7 @@ def send_push_to_user(
             )
         )
         if existing is not None:
-            return {"sent": 0, "failed": 0, "disabled": 0}
+            return {"sent": 0, "failed": 0, "disabled": 0, "subscriptions": 0, "errors": []}
         delivery = NotificationDelivery(
             user_id=user_id,
             account_id=notice.account_id,
@@ -169,7 +169,7 @@ def send_push_to_user(
             db.flush()
         except IntegrityError:
             db.rollback()
-            return {"sent": 0, "failed": 0, "disabled": 0}
+            return {"sent": 0, "failed": 0, "disabled": 0, "subscriptions": 0, "errors": []}
 
     subscriptions = list(
         db.scalars(
@@ -180,6 +180,7 @@ def send_push_to_user(
         ).all()
     )
     sent = failed = disabled = 0
+    errors: list[dict[str, Any]] = []
     payload = {
         "title": notice.title,
         "body": notice.body,
@@ -195,7 +196,25 @@ def send_push_to_user(
         except Exception as exc:  # noqa: BLE001 - provider errors vary by implementation
             failed += 1
             response = getattr(exc, "response", None)
-            status_code = getattr(response, "status_code", None)
+            status_code = getattr(exc, "status_code", None)
+            if status_code is None:
+                status_code = getattr(response, "status_code", None)
+            response_text = getattr(response, "text", None)
+            provider_excerpt = str(response_text or "").strip().replace("\n", " ")[:500]
+            failure = {
+                "error_type": type(exc).__name__,
+                "status_code": status_code,
+            }
+            errors.append(failure)
+            logger.warning(
+                "Web Push delivery failed user=%s subscription=%s status=%s error=%s provider=%s",
+                user_id,
+                subscription.subscription_hash[:12],
+                status_code,
+                type(exc).__name__,
+                provider_excerpt or "(no provider response)",
+                exc_info=True,
+            )
             if status_code in {404, 410}:
                 subscription.enabled = False
                 disabled += 1
@@ -210,7 +229,13 @@ def send_push_to_user(
         else:
             db.delete(delivery)
     db.commit()
-    return {"sent": sent, "failed": failed, "disabled": disabled}
+    return {
+        "sent": sent,
+        "failed": failed,
+        "disabled": disabled,
+        "subscriptions": len(subscriptions),
+        "errors": errors,
+    }
 
 
 def _parse_clock(value: str, fallback: str) -> time:

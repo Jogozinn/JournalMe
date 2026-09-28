@@ -1,0 +1,62 @@
+.brandMark {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  line-height: 0;
+}
+
+.fullLogo {
+  display: block;
+  width: 158px;
+  height: auto;
+  object-fit: contain;
+}
+
+.iconLogo {
+  display: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  object-fit: cover;
+}
+
+.compact .fullLogo {
+  display: none;
+}
+
+.compact .iconLogo {
+  display: block;
+}
+
+:global(.app-shell.sidebar-compact) :global(.sidebar) .fullLogo {
+  display: none;
+}
+
+:global(.app-shell.sidebar-compact) :global(.sidebar) .iconLogo {
+  display: block;
+}
+
+:global(.mobile-header) .fullLogo {
+  display: none;
+}
+
+:global(.mobile-header) .iconLogo {
+  display: block;
+}
+
+:global(.login-card) .fullLogo,
+:global(.auth-card) .fullLogo {
+  width: min(210px, 68vw);
+}
+
+:global(.login-card) .iconLogo,
+:global(.auth-card) .iconLogo {
+  width: 42px;
+  height: 42px;
+}
+
+@media (max-width: 520px) {
+  .fullLogo {
+    width: 146px;
+  }
+}

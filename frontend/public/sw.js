@@ -1,5 +1,8 @@
-const CACHE = "journalme-static-v4";
-const STATIC = ["/icon.svg"];
+const CACHE = "journalme-static-v5";
+const STATIC = [
+  "/brand/journalme-app-icon-192.png",
+  "/brand/journalme-app-icon-512.png",
+];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(STATIC)));
@@ -30,7 +33,7 @@ self.addEventListener("fetch", (event) => {
   ) {
     return;
   }
-  if (url.pathname === "/icon.svg") {
+  if (STATIC.includes(url.pathname)) {
     event.respondWith(caches.match(event.request).then((cached) => cached || fetch(event.request)));
   }
 });
@@ -46,8 +49,8 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification(title, {
       body: payload.body || "JournalMe has something new for you.",
-      icon: "/icon",
-      badge: "/icon",
+      icon: "/brand/journalme-app-icon-192.png",
+      badge: "/brand/journalme-app-icon-192.png",
       tag: payload.tag || "journalme-learning",
       data: { url: payload.url || "/intelligence", kind: payload.kind || "learning" },
     }),

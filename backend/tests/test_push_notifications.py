@@ -159,3 +159,61 @@ def test_base64_pem_vapid_key_is_converted_to_py_vapid_der_string() -> None:
     loaded = serialization.load_der_private_key(der, password=None)
 
     assert loaded.private_numbers().private_value == private_key.private_numbers().private_value
+
+
+def test_push_delivery_reports_safe_failure_details(monkeypatch, caplog) -> None:
+    class Response:
+        status_code = 401
+        text = "audience or VAPID authorization rejected"
+
+    class DeliveryError(Exception):
+        response = Response()
+        status_code = 401
+
+    with _db() as db:
+        user = User(email="push-fail@journalme.local", display_name="Push fail")
+        db.add(user)
+        db.flush()
+        subscription = PushSubscription(
+            user_id=user.id,
+            subscription_hash="b" * 64,
+            endpoint="https://push.example/subscription",
+            p256dh="secret-device-key",
+            auth="secret-auth-token",
+            enabled=True,
+        )
+        db.add(subscription)
+        db.commit()
+        monkeypatch.setattr(
+            push_notifications,
+            "_send_webpush",
+            lambda subscription, payload, settings: (_ for _ in ()).throw(DeliveryError("failed")),
+        )
+        settings = Settings(
+            vapid_public_key="public",
+            vapid_private_key="private",
+            vapid_subject="mailto:test@example.com",
+        )
+        notice = PushNotice(
+            key="test:failure",
+            kind="test",
+            title="Test",
+            body="Test",
+            url="/settings#notifications",
+        )
+        result = send_push_to_user(
+            db,
+            user.id,
+            notice,
+            settings=settings,
+            record_delivery=False,
+        )
+
+        assert result["sent"] == 0
+        assert result["failed"] == 1
+        assert result["subscriptions"] == 1
+        assert result["errors"] == [{"error_type": "DeliveryError", "status_code": 401}]
+        assert subscription.enabled is True
+        assert "Web Push delivery failed" in caplog.text
+        assert "secret-device-key" not in caplog.text
+        assert "secret-auth-token" not in caplog.text

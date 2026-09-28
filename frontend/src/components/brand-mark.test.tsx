@@ -7,7 +7,5 @@ describe("BrandMark", () => {
   it("uses the JournalMe product name", () => {
     render(<BrandMark />);
     expect(screen.getByLabelText("JournalMe")).toBeInTheDocument();
-    expect(screen.getByText("Journal")).toHaveTextContent("JournalMe");
   });
 });
-

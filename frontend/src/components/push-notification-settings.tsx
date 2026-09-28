@@ -47,9 +47,18 @@ export function PushNotificationSettings({ compact = false }: { compact?: boolea
     setMessage("");
     try {
       await enableBackgroundPush();
-      await sendTestPush();
       await refresh();
-      setMessage("Background notifications are enabled. A test notification was sent to this device.");
+      setMessage("This device is subscribed to JournalMe notifications.");
+      try {
+        await sendTestPush();
+        setMessage("This device is subscribed and the test notification was sent.");
+      } catch (reason) {
+        setError(
+          `Subscription saved, but test delivery failed: ${
+            reason instanceof Error ? reason.message : "JournalMe could not deliver the test."
+          }`,
+        );
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Notifications could not be enabled.");
     } finally {

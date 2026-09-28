@@ -47,6 +47,6 @@ describe("JournalMe service-worker cache cleanup", () => {
     });
     await cleanup;
 
-    expect(deleted).toEqual(["journalme-shell-v1", "journalme-shell-v0"]);
+    expect(deleted).toEqual(["journalme-static-v2", "journalme-shell-v1", "journalme-shell-v0"]);
   });
 });

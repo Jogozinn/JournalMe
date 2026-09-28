@@ -1293,7 +1293,28 @@ def test_push_notification(db: Db, user: CurrentUser) -> dict[str, Any]:
         record_delivery=False,
     )
     if result["sent"] == 0:
-        raise HTTPException(status_code=409, detail="No active push subscription could be reached.")
+        if result.get("subscriptions", 0) == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="No enabled push subscription is registered for this account. Re-enable notifications on this device.",
+            )
+        failure = (result.get("errors") or [{}])[0]
+        status_code = failure.get("status_code")
+        error_type = failure.get("error_type") or "delivery error"
+        if status_code in {404, 410}:
+            detail = "The saved push subscription has expired. Disable and re-enable notifications on this device."
+        elif status_code:
+            detail = (
+                f"This device is subscribed, but the push provider rejected the test "
+                f"(HTTP {status_code}, {error_type}). Check the backend log entry beginning "
+                f"'Web Push delivery failed' for the provider response."
+            )
+        else:
+            detail = (
+                f"This device is subscribed, but JournalMe could not send the test ({error_type}). "
+                f"Check the backend log entry beginning 'Web Push delivery failed' for the exact failure."
+            )
+        raise HTTPException(status_code=409, detail=detail)
     return result
 
 

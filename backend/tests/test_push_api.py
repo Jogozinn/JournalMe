@@ -87,3 +87,59 @@ def test_push_subscription_and_preferences_round_trip(monkeypatch) -> None:
         assert after.json()["active_subscriptions"] == 0
     finally:
         db.close()
+
+
+def test_push_test_distinguishes_registered_but_failed_delivery(monkeypatch) -> None:
+    client, db, _ = _client(monkeypatch)
+    try:
+        created = client.post(
+            "/api/v1/push/subscriptions",
+            json={
+                "endpoint": "https://push.example/device-1",
+                "keys": {"p256dh": "p256dh", "auth": "auth"},
+                "device_label": "iPhone Home Screen",
+                "user_agent": "Safari fixture",
+            },
+        )
+        assert created.status_code == 201, created.text
+        monkeypatch.setattr(
+            router_module,
+            "send_push_to_user",
+            lambda *args, **kwargs: {
+                "sent": 0,
+                "failed": 1,
+                "disabled": 0,
+                "subscriptions": 1,
+                "errors": [{"error_type": "WebPushException", "status_code": 401}],
+            },
+        )
+
+        response = client.post("/api/v1/push/test")
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert "device is subscribed" in detail
+        assert "HTTP 401" in detail
+        assert "WebPushException" in detail
+    finally:
+        db.close()
+
+
+def test_push_test_reports_missing_enabled_subscription(monkeypatch) -> None:
+    client, db, _ = _client(monkeypatch)
+    try:
+        monkeypatch.setattr(
+            router_module,
+            "send_push_to_user",
+            lambda *args, **kwargs: {
+                "sent": 0,
+                "failed": 0,
+                "disabled": 0,
+                "subscriptions": 0,
+                "errors": [],
+            },
+        )
+        response = client.post("/api/v1/push/test")
+        assert response.status_code == 409
+        assert "No enabled push subscription" in response.json()["detail"]
+    finally:
+        db.close()

@@ -42,6 +42,9 @@ type BrokerActivityPayload = {
 
 type LiveState = "live" | "retrying" | "error" | "offline";
 
+const VISIBLE_POLL_INTERVAL_MS = 30_000;
+const CLOCK_INTERVAL_MS = 15_000;
+
 function relativeAge(value: string | null, now = Date.now()): string {
   if (!value) return "No recent event";
   const seconds = Math.max(0, Math.round((now - new Date(value).getTime()) / 1000));
@@ -149,13 +152,28 @@ export function BrokerLiveActivity() {
     setToast(null);
     setOpen(false);
     if (!account) return;
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 3_000);
-    return () => window.clearInterval(timer);
+
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+
+    // Trading activity is sparse, so avoid hammering the hosted API just to
+    // keep the indicator fresh. Refresh immediately on entry/return, then at
+    // a modest cadence only while JournalMe is actually visible.
+    refreshWhenVisible();
+    const timer = window.setInterval(refreshWhenVisible, VISIBLE_POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    window.addEventListener("focus", refreshWhenVisible);
+
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      window.removeEventListener("focus", refreshWhenVisible);
+    };
   }, [account, refresh]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setClock(Date.now()), 5_000);
+    const timer = window.setInterval(() => setClock(Date.now()), CLOCK_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, []);
 
