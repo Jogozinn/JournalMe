@@ -487,5 +487,29 @@ class BrokerExecutionIngest(BaseModel):
     quantity: Decimal = Field(gt=0)
     price: Decimal
     commission: Decimal | None = None
+    point_value: Decimal | None = Field(default=None, gt=0)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
     executed_at: datetime
     source_payload: dict[str, object] = Field(default_factory=dict)
+
+
+class BrokerBridgeExecutionIngest(BaseModel):
+    external_execution_id: str = Field(min_length=1, max_length=160)
+    external_order_id: str | None = Field(default=None, max_length=160)
+    symbol: str = Field(min_length=1, max_length=80)
+    side: Literal["buy", "sell", "long", "short"]
+    quantity: Decimal = Field(gt=0)
+    price: Decimal
+    commission: Decimal | None = None
+    point_value: Decimal | None = Field(default=None, gt=0)
+    currency: str = Field(default="USD", min_length=3, max_length=3)
+    executed_at: datetime
+    source_payload: dict[str, object] = Field(default_factory=dict)
+
+
+class BrokerBridgeAccountSnapshot(BaseModel):
+    captured_at: datetime
+    cash_value: Decimal | None = None
+    net_liquidation: Decimal | None = None
+    realized_pnl: Decimal | None = None
+    unrealized_pnl: Decimal | None = None

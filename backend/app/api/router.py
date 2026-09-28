@@ -10,6 +10,7 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
@@ -44,6 +45,8 @@ from app.schemas import (
     AccountFromPresetCreate,
     AccountUpdate,
     BrokerConnectionCreate,
+    BrokerBridgeAccountSnapshot,
+    BrokerBridgeExecutionIngest,
     BrokerConnectionUpdate,
     BrokerExecutionIngest,
     DailyJournalUpdate,
@@ -56,6 +59,8 @@ from app.schemas import (
     TradeJournalUpdate,
 )
 from app.seed import seed_default_tags
+from app.services.broker_bridge_auth import authenticate_bridge_token, issue_bridge_token, revoke_bridge_token
+from app.services.broker_ingestion import materialize_closed_trades
 from app.services.balance import (
     BalanceResolution,
     resolve_account_balance,
@@ -88,6 +93,18 @@ from app.storage import StorageProvider, get_storage_provider
 router = APIRouter()
 Db = Annotated[Session, Depends(get_db)]
 CurrentUser = Annotated[User, Depends(get_current_user)]
+bridge_bearer = HTTPBearer(auto_error=False)
+
+
+def _bridge_connection_auth(
+    db: Annotated[Session, Depends(get_db)],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bridge_bearer)],
+) -> BrokerConnection:
+    token = credentials.credentials if credentials else None
+    return authenticate_bridge_token(db, token)
+
+
+BridgeConnectionAuth = Annotated[BrokerConnection, Depends(_bridge_connection_auth)]
 
 
 def _storage() -> StorageProvider:
@@ -1152,6 +1169,9 @@ def _broker_connection_dict(connection: BrokerConnection) -> dict[str, Any]:
         "status": connection.status,
         "external_account_id": connection.external_account_id,
         "metadata_json": connection.metadata_json,
+        "bridge_key_configured": bool(connection.bridge_token_hash),
+        "bridge_token_prefix": connection.bridge_token_prefix,
+        "bridge_token_created_at": _timestamp(connection.bridge_token_created_at),
         "last_seen_at": _timestamp(connection.last_seen_at),
         "last_sync_at": _timestamp(connection.last_sync_at),
         "created_at": _timestamp(connection.created_at),
@@ -1202,6 +1222,37 @@ def update_broker_connection(
     return _broker_connection_dict(item)
 
 
+@router.post("/broker-connections/{connection_id}/bridge-token")
+def create_broker_bridge_token(
+    connection_id: UUID, db: Db, user: CurrentUser
+) -> dict[str, Any]:
+    item = _broker_connection_or_404(db, user, connection_id)
+    issued = issue_bridge_token(item)
+    item.status = "disconnected"
+    metadata = dict(item.metadata_json or {})
+    metadata["bridge_version"] = "0.7.1"
+    metadata["read_only"] = True
+    item.metadata_json = metadata
+    db.commit()
+    return {
+        "connection_id": str(item.id),
+        "bridge_token": issued.token,
+        "bridge_token_prefix": issued.prefix,
+        "created_at": _timestamp(issued.created_at),
+    }
+
+
+@router.delete("/broker-connections/{connection_id}/bridge-token", status_code=status.HTTP_204_NO_CONTENT)
+def delete_broker_bridge_token(
+    connection_id: UUID, db: Db, user: CurrentUser
+) -> Response:
+    item = _broker_connection_or_404(db, user, connection_id)
+    revoke_bridge_token(item)
+    item.status = "disconnected"
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/broker-connections/{connection_id}/heartbeat")
 def broker_connection_heartbeat(
     connection_id: UUID, db: Db, user: CurrentUser
@@ -1212,6 +1263,95 @@ def broker_connection_heartbeat(
     db.commit()
     db.refresh(item)
     return _broker_connection_dict(item)
+
+
+@router.post("/broker-bridge/heartbeat")
+def broker_bridge_heartbeat(
+    db: Db, connection: BridgeConnectionAuth
+) -> dict[str, Any]:
+    connection.status = "connected"
+    connection.last_seen_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(connection)
+    return {"status": "ok", "connection_id": str(connection.id), "server_time": _timestamp(datetime.now(timezone.utc))}
+
+
+@router.post("/broker-bridge/account-snapshot")
+def broker_bridge_account_snapshot(
+    payload: BrokerBridgeAccountSnapshot,
+    db: Db,
+    connection: BridgeConnectionAuth,
+) -> dict[str, Any]:
+    metadata = dict(connection.metadata_json or {})
+    metadata["account_snapshot"] = {
+        "captured_at": _timestamp(payload.captured_at),
+        "cash_value": _decimal(payload.cash_value),
+        "net_liquidation": _decimal(payload.net_liquidation),
+        "realized_pnl": _decimal(payload.realized_pnl),
+        "unrealized_pnl": _decimal(payload.unrealized_pnl),
+    }
+    connection.metadata_json = metadata
+    connection.status = "connected"
+    connection.last_seen_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"status": "ok", "connection_id": str(connection.id)}
+
+
+@router.post("/broker-bridge/executions", status_code=status.HTTP_201_CREATED)
+def broker_bridge_execution(
+    payload: BrokerBridgeExecutionIngest,
+    db: Db,
+    connection: BridgeConnectionAuth,
+) -> dict[str, Any]:
+    if connection.account_id is None:
+        raise HTTPException(status_code=409, detail="Bridge connection is not mapped to a JournalMe account.")
+    existing = db.scalar(
+        select(BrokerExecutionEvent).where(
+            BrokerExecutionEvent.connection_id == connection.id,
+            BrokerExecutionEvent.external_execution_id == payload.external_execution_id,
+        )
+    )
+    if existing is not None:
+        created_trades = materialize_closed_trades(db, connection, symbol=existing.symbol)
+        db.commit()
+        return {
+            "id": str(existing.id),
+            "duplicate": True,
+            "ingest_status": existing.ingest_status,
+            "trade_ids": [str(item.id) for item in created_trades],
+        }
+    item = BrokerExecutionEvent(
+        user_id=connection.user_id,
+        account_id=connection.account_id,
+        connection_id=connection.id,
+        provider=connection.provider,
+        external_execution_id=payload.external_execution_id,
+        external_order_id=payload.external_order_id,
+        symbol=payload.symbol,
+        side=payload.side,
+        quantity=payload.quantity,
+        price=payload.price,
+        commission=payload.commission,
+        point_value=payload.point_value,
+        currency=payload.currency.upper(),
+        executed_at=payload.executed_at,
+        ingest_status="received",
+        source_payload=payload.source_payload,
+    )
+    connection.status = "connected"
+    connection.last_seen_at = datetime.now(timezone.utc)
+    connection.last_sync_at = datetime.now(timezone.utc)
+    db.add(item)
+    db.flush()
+    created_trades = materialize_closed_trades(db, connection, symbol=payload.symbol)
+    db.commit()
+    db.refresh(item)
+    return {
+        "id": str(item.id),
+        "duplicate": False,
+        "ingest_status": item.ingest_status,
+        "trade_ids": [str(trade.id) for trade in created_trades],
+    }
 
 
 @router.post("/broker-executions", status_code=status.HTTP_201_CREATED)
@@ -1246,6 +1386,8 @@ def ingest_broker_execution(
         quantity=payload.quantity,
         price=payload.price,
         commission=payload.commission,
+        point_value=payload.point_value,
+        currency=payload.currency.upper(),
         executed_at=payload.executed_at,
         ingest_status="received",
         source_payload=payload.source_payload,
@@ -1254,9 +1396,16 @@ def ingest_broker_execution(
     connection.last_seen_at = datetime.now(timezone.utc)
     connection.last_sync_at = datetime.now(timezone.utc)
     db.add(item)
+    db.flush()
+    created_trades = materialize_closed_trades(db, connection, symbol=payload.symbol)
     db.commit()
     db.refresh(item)
-    return {"id": str(item.id), "duplicate": False, "ingest_status": item.ingest_status}
+    return {
+        "id": str(item.id),
+        "duplicate": False,
+        "ingest_status": item.ingest_status,
+        "trade_ids": [str(trade.id) for trade in created_trades],
+    }
 
 
 @router.get("/broker-executions")
@@ -1286,6 +1435,8 @@ def list_broker_executions(
             "quantity": _decimal(item.quantity),
             "price": _decimal(item.price),
             "commission": _decimal(item.commission),
+            "point_value": _decimal(item.point_value),
+            "currency": item.currency,
             "executed_at": _timestamp(item.executed_at),
             "ingest_status": item.ingest_status,
         }

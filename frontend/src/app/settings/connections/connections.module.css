@@ -1,0 +1,46 @@
+.bridgeKeyCard {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.bridgeConfigPreview {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  border-radius: 10px;
+  font-size: 0.82rem;
+  line-height: 1.55;
+}
+
+.bridgeActions {
+  display: flex !important;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem !important;
+}
+
+.bridgeActions small {
+  flex-basis: 100%;
+}
+
+.accountNameField {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.accountNameField span {
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+.accountNameField input {
+  width: min(100%, 34rem);
+}
+
+.accountNameField small {
+  color: var(--muted);
+}
