@@ -79,11 +79,39 @@ def merged_push_preferences(item: UserPreference | None) -> dict[str, Any]:
 
 
 def _private_key(settings: Settings) -> str:
+    """Return a py_vapid-compatible DER/base64url signing key.
+
+    JournalMe stores the generated private key as base64-encoded PEM so it can
+    live safely in a single environment variable. pywebpush/py_vapid does not
+    accept PEM *contents* as its string form; a string is interpreted as an
+    encoded DER/raw key (a PEM file *path* is supported, but PEM text is not).
+    Convert PEM contents to DER and base64url-encode them before passing the
+    key to pywebpush.
+    """
+    from cryptography.hazmat.primitives import serialization
+
+    raw: bytes
     if settings.vapid_private_key:
-        return settings.vapid_private_key.replace("\\n", "\n")
-    if settings.vapid_private_key_b64:
-        return base64.b64decode(settings.vapid_private_key_b64).decode("utf-8")
-    raise RuntimeError("VAPID private key is not configured.")
+        value = settings.vapid_private_key.replace("\\n", "\n").strip()
+        if "-----BEGIN" not in value:
+            # Preserve support for an already py_vapid-compatible encoded key.
+            return value
+        raw = value.encode("utf-8")
+    elif settings.vapid_private_key_b64:
+        raw = base64.b64decode(settings.vapid_private_key_b64)
+        if b"-----BEGIN" not in raw:
+            # A base64-wrapped DER key is also accepted as input.
+            return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    else:
+        raise RuntimeError("VAPID private key is not configured.")
+
+    private_key = serialization.load_pem_private_key(raw, password=None)
+    der = private_key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    return base64.urlsafe_b64encode(der).rstrip(b"=").decode("ascii")
 
 
 def _send_webpush(subscription: PushSubscription, payload: dict[str, Any], settings: Settings) -> None:

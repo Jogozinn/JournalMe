@@ -133,3 +133,29 @@ def test_daily_cue_uses_the_users_own_saved_lesson() -> None:
         assert notices[0].kind == "cue"
         assert notices[0].body == "Wait for confirmation instead of anticipating the reversal."
         assert notices[0].url == f"/trades/{trade.id}"
+
+
+def test_base64_pem_vapid_key_is_converted_to_py_vapid_der_string() -> None:
+    import base64
+
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    settings = Settings(
+        vapid_public_key="public",
+        vapid_private_key_b64=base64.b64encode(pem).decode("ascii"),
+        vapid_subject="mailto:test@example.com",
+    )
+
+    encoded = push_notifications._private_key(settings)
+    padding = "=" * ((4 - len(encoded) % 4) % 4)
+    der = base64.urlsafe_b64decode(encoded + padding)
+    loaded = serialization.load_der_private_key(der, password=None)
+
+    assert loaded.private_numbers().private_value == private_key.private_numbers().private_value
