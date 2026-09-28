@@ -57,7 +57,18 @@ class Settings(BaseModel):
 
     @property
     def cors_origin_list(self) -> list[str]:
-        return [value.strip() for value in self.cors_origins.split(",") if value.strip()]
+        # Browser Origin headers never include a trailing slash. Normalize the
+        # deployment setting so an otherwise-correct Vercel origin still
+        # matches if it was entered with one.
+        origins: list[str] = []
+        for raw in self.cors_origins.split(","):
+            value = raw.strip()
+            if not value:
+                continue
+            normalized = value.rstrip("/")
+            if normalized and normalized not in origins:
+                origins.append(normalized)
+        return origins
 
 
 @lru_cache

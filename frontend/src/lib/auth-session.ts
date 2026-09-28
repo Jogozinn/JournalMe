@@ -124,10 +124,26 @@ export async function authorizationHeaders(): Promise<HeadersInit> {
   return accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
 }
 
+/**
+ * Force a Supabase refresh and return headers for a one-time API retry.
+ * This keeps a transient/expired access token from signing the user out in the
+ * middle of page restoration.
+ */
+export async function refreshAuthorizationHeaders(): Promise<HeadersInit> {
+  if (!hostedAuthEnabled) return {};
+  const { data, error } = await getSupabaseBrowserClient().auth.refreshSession();
+  if (error) throw error;
+  rememberSession(data.session);
+  return accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
+}
+
+/**
+ * Clear only JournalMe's in-memory bearer-token cache. API 401 responses should
+ * not call Supabase logout automatically; the AuthProvider owns the browser
+ * session and Supabase can still recover it with the refresh token.
+ */
 export async function invalidateHostedSession(): Promise<void> {
   accessToken = undefined;
-  if (!hostedAuthEnabled) return;
-  await getSupabaseBrowserClient().auth.signOut({ scope: "local" });
 }
 
 /** Test seam; application code should obtain tokens through Supabase sessions. */

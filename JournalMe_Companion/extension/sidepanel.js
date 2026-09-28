@@ -37,6 +37,23 @@ const selected = {
 const $ = (id) => document.getElementById(id);
 chrome.runtime.connect({ name: "journalme-sidepanel" });
 
+async function runtimeMessage(message, { quiet = false } = {}) {
+  try {
+    return await chrome.runtime.sendMessage(message);
+  } catch (error) {
+    const text = String(error?.message || error || "");
+    const receiverMissing =
+      text.includes("Receiving end does not exist") ||
+      text.includes("message port closed") ||
+      text.includes("Extension context invalidated");
+    if (receiverMissing && quiet) return null;
+    if (receiverMissing) {
+      throw new Error("JournalMe Companion was reloaded. Close and reopen the side panel once.");
+    }
+    throw error;
+  }
+}
+
 function uniqueTags(values) {
   const seen = new Set();
   return values.filter((value) => {
@@ -154,7 +171,7 @@ async function loadPending() {
 }
 
 async function authContext() {
-  const result = await chrome.runtime.sendMessage({ type: "GET_AUTH_CONTEXT" });
+  const result = await runtimeMessage({ type: "GET_AUTH_CONTEXT" });
   connection = result;
   return result;
 }
@@ -303,7 +320,7 @@ async function captureNow() {
     setStatus("Capturing...");
     $("captureBtn").disabled = true;
     await ensureCapturePermission();
-    const response = await chrome.runtime.sendMessage({ type: "CAPTURE_NOW" });
+    const response = await runtimeMessage({ type: "CAPTURE_NOW" });
     if (!response?.ok) throw new Error(response?.error || "Capture failed.");
     pendingCapture = response.pending;
     renderPending();
@@ -498,7 +515,7 @@ function renderRecentEpisodes(items) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "recent-item";
-    button.addEventListener("click", () => chrome.runtime.sendMessage({ type: "ROUTE_APP", path: "/companion", activate: true }));
+    button.addEventListener("click", () => void runtimeMessage({ type: "ROUTE_APP", path: "/companion", activate: true }, { quiet: true }));
     const main = document.createElement("div");
     main.className = "recent-main";
     const title = document.createElement("strong");
@@ -577,7 +594,7 @@ async function endEpisode() {
 }
 
 async function openJournalMe() {
-  await chrome.runtime.sendMessage({ type: "ROUTE_APP", path: "/companion", activate: true });
+  await runtimeMessage({ type: "ROUTE_APP", path: "/companion", activate: true });
 }
 
 async function signInHosted() {
@@ -591,7 +608,7 @@ async function signInHosted() {
   $("signInBtn").disabled = true;
   $("signInBtn").textContent = "Signing in...";
   try {
-    const result = await chrome.runtime.sendMessage({ type: "SIGN_IN_HOSTED", email, password });
+    const result = await runtimeMessage({ type: "SIGN_IN_HOSTED", email, password });
     if (!result?.ok) throw new Error(result?.error || "JournalMe sign in failed.");
     $("authPassword").value = "";
     setStatus("Signed in. Companion sync is ready.", "ok");
@@ -607,7 +624,7 @@ async function signInHosted() {
 }
 
 async function signOutHosted() {
-  await chrome.runtime.sendMessage({ type: "SIGN_OUT_HOSTED" });
+  await runtimeMessage({ type: "SIGN_OUT_HOSTED" });
   connection = null;
   activeEpisode = null;
   renderActiveEpisode();
@@ -618,7 +635,7 @@ async function signOutHosted() {
 }
 
 async function openAuthRoute(path) {
-  await chrome.runtime.sendMessage({ type: "ROUTE_APP", path, activate: true });
+  await runtimeMessage({ type: "ROUTE_APP", path, activate: true });
 }
 
 document.querySelectorAll(".phase").forEach((button) => button.addEventListener("click", () => setPhase(button.dataset.phase)));
@@ -655,7 +672,9 @@ $("authPassword").addEventListener("keydown", (event) => { if (event.key === "En
 $("signOutBtn").addEventListener("click", signOutHosted);
 $("registerBtn").addEventListener("click", () => openAuthRoute("/register"));
 $("forgotBtn").addEventListener("click", () => openAuthRoute("/forgot-password"));
-$("openSavedBtn").addEventListener("click", () => lastSavedRoute && chrome.runtime.sendMessage({ type: "ROUTE_APP", path: lastSavedRoute, activate: true }));
+$("openSavedBtn").addEventListener("click", () => {
+  if (lastSavedRoute) void runtimeMessage({ type: "ROUTE_APP", path: lastSavedRoute, activate: true }, { quiet: true });
+});
 
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;

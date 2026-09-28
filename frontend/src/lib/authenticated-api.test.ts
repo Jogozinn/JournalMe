@@ -13,7 +13,7 @@ describe("authenticated JournalMe API", () => {
         Authorization: "Bearer cloud-access-token",
       }),
       hostedAuthEnabled: true,
-      invalidateHostedSession: vi.fn(),
+      refreshAuthorizationHeaders: vi.fn(),
     }));
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify([{ id: "account" }]), {
@@ -33,14 +33,53 @@ describe("authenticated JournalMe API", () => {
     );
   });
 
-  it("invalidates the hosted session after an unauthorized API response", async () => {
-    const invalidateHostedSession = vi.fn().mockResolvedValue(undefined);
+  it("refreshes once and retries after an unauthorized API response", async () => {
+    const refreshAuthorizationHeaders = vi.fn().mockResolvedValue({
+      Authorization: "Bearer refreshed-token",
+    });
     vi.doMock("@/lib/auth-session", () => ({
       authorizationHeaders: vi.fn().mockResolvedValue({
         Authorization: "Bearer expired-token",
       }),
       hostedAuthEnabled: true,
-      invalidateHostedSession,
+      refreshAuthorizationHeaders,
+    }));
+    const fetchMock = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: "Authentication is required." }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ id: "trade" }]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    const { api } = await import("@/lib/api");
+    await expect(api("/trades")).resolves.toEqual([{ id: "trade" }]);
+    expect(refreshAuthorizationHeaders).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer refreshed-token",
+        }),
+      }),
+    );
+  });
+
+  it("does not force a Supabase logout when the refreshed API request is still unauthorized", async () => {
+    const refreshAuthorizationHeaders = vi.fn().mockResolvedValue({
+      Authorization: "Bearer refreshed-token",
+    });
+    vi.doMock("@/lib/auth-session", () => ({
+      authorizationHeaders: vi.fn().mockResolvedValue({
+        Authorization: "Bearer expired-token",
+      }),
+      hostedAuthEnabled: true,
+      refreshAuthorizationHeaders,
     }));
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ detail: "Authentication is required." }), {
@@ -50,6 +89,6 @@ describe("authenticated JournalMe API", () => {
     );
     const { api } = await import("@/lib/api");
     await expect(api("/trades")).rejects.toMatchObject({ status: 401 });
-    expect(invalidateHostedSession).toHaveBeenCalledOnce();
+    expect(refreshAuthorizationHeaders).toHaveBeenCalledOnce();
   });
 });

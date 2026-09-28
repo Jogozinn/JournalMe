@@ -1,7 +1,7 @@
 import {
   authorizationHeaders,
   hostedAuthEnabled,
-  invalidateHostedSession,
+  refreshAuthorizationHeaders,
 } from "@/lib/auth-session";
 
 /** One API-origin seam for desktop/local and hosted web deployments. */
@@ -104,23 +104,31 @@ export async function api<T>(
   }
 
   const request = (async () => {
-    const authHeaders = await authorizationHeaders();
-    const response = await fetch(`${API_URL}${path}`, {
-      ...options,
-      headers:
-        options?.body instanceof FormData
-          ? { ...authHeaders, ...options.headers }
-          : {
-              "Content-Type": "application/json",
-              ...authHeaders,
-              ...options?.headers,
-            },
-      cache: "no-store",
-    });
-    if (!response.ok) {
-      if (response.status === 401 && hostedAuthEnabled) {
-        await invalidateHostedSession().catch(() => undefined);
+    const doFetch = async (authHeaders: HeadersInit) =>
+      fetch(`${API_URL}${path}`, {
+        ...options,
+        headers:
+          options?.body instanceof FormData
+            ? { ...authHeaders, ...options.headers }
+            : {
+                "Content-Type": "application/json",
+                ...authHeaders,
+                ...options?.headers,
+              },
+        cache: "no-store",
+      });
+
+    let response = await doFetch(await authorizationHeaders());
+    if (response.status === 401 && hostedAuthEnabled) {
+      try {
+        const refreshedHeaders = await refreshAuthorizationHeaders();
+        response = await doFetch(refreshedHeaders);
+      } catch {
+        // Preserve the original unauthorized response. Supabase owns session
+        // restoration; an API race must not force a browser logout.
       }
+    }
+    if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as {
         detail?: unknown;
       } | null;
@@ -146,12 +154,17 @@ export async function api<T>(
 
 export async function apiBlob(path: string): Promise<Blob> {
   const target = path.startsWith("http://") || path.startsWith("https://") ? path : assetUrl(path);
-  const response = await fetch(target, {
-    headers: await authorizationHeaders(),
+  const doFetch = async (authHeaders: HeadersInit) => fetch(target, {
+    headers: authHeaders,
     cache: "no-store",
   });
+  let response = await doFetch(await authorizationHeaders());
   if (response.status === 401 && hostedAuthEnabled) {
-    await invalidateHostedSession().catch(() => undefined);
+    try {
+      response = await doFetch(await refreshAuthorizationHeaders());
+    } catch {
+      // Keep the original 401 without forcing a Supabase logout.
+    }
   }
   if (!response.ok) {
     throw new ApiError("JournalMe could not load that file.", response.status);

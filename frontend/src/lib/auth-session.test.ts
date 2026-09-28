@@ -28,6 +28,10 @@ describe("hosted Supabase session boundary", () => {
     const resetPasswordForEmail = vi.fn().mockResolvedValue({ error: null });
     const updateUser = vi.fn().mockResolvedValue({ data: { user: {} }, error: null });
     const signOut = vi.fn().mockResolvedValue({ error: null });
+    const refreshSession = vi.fn().mockResolvedValue({
+      data: { session: { ...session, access_token: "refreshed-token" } },
+      error: null,
+    });
     const createClient = vi.fn(() => ({
       auth: {
         signInWithPassword,
@@ -35,6 +39,7 @@ describe("hosted Supabase session boundary", () => {
         resetPasswordForEmail,
         updateUser,
         getSession,
+        refreshSession,
         signOut,
         onAuthStateChange: vi.fn(() => ({
           data: { subscription: { unsubscribe: vi.fn() } },
@@ -49,6 +54,10 @@ describe("hosted Supabase session boundary", () => {
     expect(await auth.authorizationHeaders()).toEqual({
       Authorization: "Bearer access-token",
     });
+    expect(await auth.refreshAuthorizationHeaders()).toEqual({
+      Authorization: "Bearer refreshed-token",
+    });
+    expect(refreshSession).toHaveBeenCalledOnce();
     expect(signInWithPassword).toHaveBeenCalledWith({
       email: "trader@example.com",
       password: "password",

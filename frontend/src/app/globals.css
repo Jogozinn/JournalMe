@@ -7708,10 +7708,10 @@ input[type="datetime-local"] {
   }
 
   .companion-save {
-    position: sticky;
-    bottom: 72px;
-    z-index: 3;
-    box-shadow: 0 -10px 25px rgba(0,0,0,.28);
+    position: static;
+    bottom: auto;
+    z-index: auto;
+    box-shadow: none;
   }
 }
 
