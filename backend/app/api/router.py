@@ -61,6 +61,7 @@ from app.schemas import (
 from app.seed import seed_default_tags
 from app.services.broker_bridge_auth import authenticate_bridge_token, issue_bridge_token, revoke_bridge_token
 from app.services.broker_ingestion import materialize_closed_trades
+from app.services.instrument_identity import root_symbol
 from app.services.balance import (
     BalanceResolution,
     resolve_account_balance,
@@ -174,6 +175,11 @@ def _as_utc(value: datetime) -> datetime:
 
 def _timestamp(value: datetime | None) -> str | None:
     return _as_utc(value).isoformat() if value else None
+def _as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
 
 
 def _account_dict(
@@ -1442,6 +1448,101 @@ def list_broker_executions(
         }
         for item in items
     ]
+
+
+@router.get("/broker-activity")
+def broker_activity(
+    account_id: UUID,
+    db: Db,
+    user: CurrentUser,
+    limit: int = Query(default=20, ge=1, le=50),
+) -> dict[str, Any]:
+    _account_or_404(db, user, account_id)
+    connections = list(
+        db.scalars(
+            select(BrokerConnection)
+            .where(
+                BrokerConnection.user_id == user.id,
+                BrokerConnection.account_id == account_id,
+                BrokerConnection.provider == "ninjatrader",
+            )
+            .order_by(BrokerConnection.created_at)
+        ).all()
+    )
+    events = list(
+        db.scalars(
+            select(BrokerExecutionEvent)
+            .where(
+                BrokerExecutionEvent.user_id == user.id,
+                BrokerExecutionEvent.account_id == account_id,
+                BrokerExecutionEvent.provider == "ninjatrader",
+            )
+            .order_by(BrokerExecutionEvent.executed_at.desc())
+            .limit(limit)
+        ).all()
+    )
+
+    event_ids = {event.external_execution_id for event in events}
+    completed_by_execution: dict[str, Trade] = {}
+    if event_ids:
+        recent_trades = list(
+            db.scalars(
+                select(Trade)
+                .where(Trade.account_id == account_id)
+                .order_by(Trade.exit_timestamp.desc())
+                .limit(max(100, limit * 4))
+            ).all()
+        )
+        for trade in recent_trades:
+            payload = trade.source_payload or {}
+            final_execution_id = payload.get("final_execution_id")
+            if final_execution_id and str(final_execution_id) in event_ids:
+                completed_by_execution[str(final_execution_id)] = trade
+                continue
+            execution_ids = payload.get("execution_ids")
+            if not isinstance(execution_ids, list):
+                continue
+            matching = event_ids.intersection(str(value) for value in execution_ids if value)
+            for execution_id in matching:
+                # Legacy live trades did not record final_execution_id. Only mark
+                # an event completed when its timestamp is the trade's flat time.
+                event = next(
+                    (candidate for candidate in events if candidate.external_execution_id == execution_id),
+                    None,
+                )
+                if event is None:
+                    continue
+                if abs((_as_aware_utc(event.executed_at) - _as_aware_utc(trade.exit_timestamp)).total_seconds()) <= 1.0:
+                    completed_by_execution[execution_id] = trade
+
+    return {
+        "connections": [_broker_connection_dict(item) for item in connections],
+        "events": [
+            {
+                "id": str(item.id),
+                "connection_id": str(item.connection_id),
+                "provider": item.provider,
+                "external_execution_id": item.external_execution_id,
+                "external_order_id": item.external_order_id,
+                "symbol": item.symbol,
+                "root_symbol": root_symbol(item.symbol),
+                "side": item.side,
+                "quantity": _decimal(item.quantity),
+                "price": _decimal(item.price),
+                "commission": _decimal(item.commission),
+                "currency": item.currency,
+                "executed_at": _timestamp(item.executed_at),
+                "ingest_status": item.ingest_status,
+                "market_position": (item.source_payload or {}).get("market_position"),
+                "completed_trade": (
+                    _trade_dict(completed_by_execution[item.external_execution_id])
+                    if item.external_execution_id in completed_by_execution
+                    else None
+                ),
+            }
+            for item in events
+        ],
+    }
 
 
 @router.get("/reconciliation-warnings")

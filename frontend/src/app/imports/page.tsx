@@ -54,7 +54,7 @@ export default function ImportHistoryPage() {
       <PageHeader eyebrow="Source ledger" title="Imports & data quality" description="Normal canceled orders remain retained evidence; only unmatched filled activity is treated as an error." action={<Link className="button primary" href="/import">New import</Link>} />
       {error && <ErrorState message={error} />}
       {quality && <section className="quality-grid">
-        <article className="card"><span>Unmatched fills</span><strong>{quality.unmatched_fills}</strong><small>Should be zero</small></article>
+        <article className="card"><span>Open / unmatched fills</span><strong>{quality.unmatched_fills}</strong><small>May include the current open position</small></article>
         <article className="card"><span>Unmatched filled orders</span><strong>{quality.unmatched_filled_orders}</strong><small>Should be zero</small></article>
         <article className="card"><span>Canceled orders retained</span><strong>{quality.canceled_orders_retained}</strong><small>Normal source evidence</small></article>
         <article className="card"><span>Missing commissions</span><strong>{quality.missing_commissions}</strong><small>Unavailable, never assumed zero</small></article>

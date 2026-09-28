@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -14,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.domain import TradeSide
 from app.models import BrokerConnection, BrokerExecutionEvent, Trade
 from app.services.capture_matching import reconcile_unmatched_captures
+from app.services.instrument_identity import canonical_contract_key, root_symbol
 
 
 @dataclass(frozen=True)
@@ -45,13 +45,6 @@ def _as_utc(value: datetime) -> datetime:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 
-
-def _root_symbol(symbol: str) -> str:
-    compact = symbol.replace(" ", "").upper()
-    # NinjaTrader typically emits symbols like "MNQ 12-26" while imports may use MNQZ26.
-    if match := re.match(r"^([A-Z0-9]+?)(?:\d{2}-\d{2})$", compact):
-        return match.group(1)
-    return re.sub(r"[FGHJKMNQUVXZ]\d{1,2}$", "", compact) or compact
 
 
 def _side_sign(side: str) -> int:
@@ -216,15 +209,21 @@ def materialize_closed_trades(
         BrokerExecutionEvent.connection_id == connection.id,
         BrokerExecutionEvent.account_id == connection.account_id,
     )
-    if symbol:
-        statement = statement.where(BrokerExecutionEvent.symbol == symbol)
     events = list(db.scalars(statement.order_by(BrokerExecutionEvent.executed_at, BrokerExecutionEvent.created_at)).all())
+    if symbol:
+        requested_contract = canonical_contract_key(symbol)
+        events = [
+            event
+            for event in events
+            if canonical_contract_key(event.symbol, event.executed_at) == requested_contract
+        ]
     if not events:
         return []
 
     by_symbol: dict[str, list[BrokerExecutionEvent]] = {}
     for event in events:
-        by_symbol.setdefault(event.symbol, []).append(event)
+        contract_key = canonical_contract_key(event.symbol, event.executed_at)
+        by_symbol.setdefault(contract_key, []).append(event)
 
     created: list[Trade] = []
     used_event_ids: set[UUID] = set()
@@ -252,7 +251,7 @@ def materialize_closed_trades(
                 external_sell_fill_id=",".join(sell_ids) or None,
                 duplicate_fingerprint=fingerprint,
                 symbol=trip.symbol,
-                root_symbol=_root_symbol(trip.symbol),
+                root_symbol=root_symbol(trip.symbol),
                 product=None,
                 product_description=None,
                 contract_quantity=trip.quantity,
@@ -274,6 +273,11 @@ def materialize_closed_trades(
                     "provider": connection.provider,
                     "connection_id": str(connection.id),
                     "execution_ids": sorted({item.event.external_execution_id for item in trip.slices}),
+                    "final_execution_id": max(
+                        trip.slices,
+                        key=lambda item: (_as_utc(item.event.executed_at), item.event.created_at, str(item.event.id)),
+                    ).event.external_execution_id,
+                    "canonical_contract": canonical_contract_key(trip.symbol, trip.entry_timestamp),
                     "point_value": str(trip.point_value),
                     "warnings": warnings,
                 },

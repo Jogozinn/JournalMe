@@ -108,5 +108,44 @@ def test_supplied_sanitization_source_reconciles_to_expected_totals() -> None:
     trades = reconcile_completed_trades(reports, "MASKED")
     assert len(performance.rows) == 13
     assert empty.warnings
-    assert len(trades) == 12
+    # With a Fills report present, canonical JournalMe trades are position lifecycles
+    # (flat -> position -> flat), not Tradovate lot-pair groups.
+    assert len(trades) == 9
     assert sum((trade.fees or Decimal("0")) for trade in trades) == Decimal("28.8")
+
+
+def test_fills_define_flat_to_flat_trade_boundary_with_partial_exit() -> None:
+    fills = (
+        b"Fill ID,Order ID,Account,B/S,Quantity,Price,commission,Timestamp,"
+        b"_tradeDate,Contract,Product,Product Description\n"
+        b"F1,O1,MASKED,Buy,2,100,1.00,09/28/2026 10:00:00,2026-09-28,MNQZ6,MNQ,Nasdaq\n"
+        b"F2,O2,MASKED,Buy,1,101,0.50,09/28/2026 10:01:00,2026-09-28,MNQZ6,MNQ,Nasdaq\n"
+        b"F3,O3,MASKED,Sell,1,102,0.50,09/28/2026 10:02:00,2026-09-28,MNQZ6,MNQ,Nasdaq\n"
+        b"F4,O4,MASKED,Sell,2,103,1.00,09/28/2026 10:03:00,2026-09-28,MNQZ6,MNQ,Nasdaq\n"
+        # New position is only partially closed, so it must not be materialized.
+        b"F5,O5,MASKED,Buy,2,104,1.00,09/28/2026 10:04:00,2026-09-28,MNQZ6,MNQ,Nasdaq\n"
+        b"F6,O6,MASKED,Sell,1,105,0.50,09/28/2026 10:05:00,2026-09-28,MNQZ6,MNQ,Nasdaq\n"
+    )
+    report = parse_report("Fills.csv", fills)
+    trades = reconcile_completed_trades([report], "MASKED")
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.side is TradeSide.LONG
+    assert trade.quantity == Decimal("3")
+    assert trade.fill_ids == {"F1", "F2", "F3", "F4"}
+    assert trade.entry_timestamp.minute == 0
+    assert trade.exit_timestamp.minute == 3
+    assert trade.duration_seconds == 180
+    assert trade.fees == Decimal("3.00")
+
+
+def test_contract_identity_reconciles_ninjatrader_and_tradovate_symbols() -> None:
+    from datetime import datetime, timezone
+
+    from app.services.instrument_identity import canonical_contract_key, root_symbol
+
+    reference = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    assert canonical_contract_key("MNQ 12-26", reference) == "MNQ:2026-12"
+    assert canonical_contract_key("MNQZ6", reference) == "MNQ:2026-12"
+    assert root_symbol("MNQ 12-26") == "MNQ"
+    assert root_symbol("MNQZ6") == "MNQ"

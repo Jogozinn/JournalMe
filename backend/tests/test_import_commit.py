@@ -122,9 +122,11 @@ def test_real_seven_file_commit_and_reupload_are_atomic_and_idempotent() -> None
         db.flush()
 
         preview = build_preview(reports, db, account)
-        assert preview["canonical_trades"] == 12
-        assert preview["new_trades"] == 12
-        assert preview["duplicate_rows"] == 1
+        # Fills now define JournalMe trades by flat -> position -> flat lifecycle.
+        # This sanitized fixture contains 9 completed position lifecycles, not 12 lot-pair groups.
+        assert preview["canonical_trades"] == 9
+        assert preview["new_trades"] == 9
+        assert preview["duplicate_rows"] == 0
         assert preview["unmatched_fills"] == 0
         assert preview["linked_filled_orders"] == 24
         assert preview["canceled_unfilled_orders"] == 13
@@ -135,13 +137,13 @@ def test_real_seven_file_commit_and_reupload_are_atomic_and_idempotent() -> None
         first_counts = commit_import(db, user, first_batch, storage)
         db.commit()
         assert first_counts == {
-            "trades": 12,
+            "trades": 9,
             "fills": 25,
             "orders": 37,
             "cash_transactions": 39,
             "daily_balances": 4,
         }
-        assert db.scalar(select(func.count()).select_from(Trade)) == 12
+        assert db.scalar(select(func.count()).select_from(Trade)) == 9
         assert db.scalar(select(func.count()).select_from(Fill)) == 25
         assert db.scalar(select(func.count()).select_from(Order)) == 37
         assert (
@@ -202,7 +204,7 @@ def test_real_seven_file_commit_and_reupload_are_atomic_and_idempotent() -> None
         db.commit()
         second_preview = build_preview(reports, db, account)
         assert second_preview["new_trades"] == 0
-        assert second_preview["existing_trades"] == 12
+        assert second_preview["existing_trades"] == 9
         second_counts = commit_import(db, user, second_batch, storage)
         db.commit()
         assert second_counts == {
@@ -212,5 +214,5 @@ def test_real_seven_file_commit_and_reupload_are_atomic_and_idempotent() -> None
             "cash_transactions": 0,
             "daily_balances": 0,
         }
-        assert db.scalar(select(func.count()).select_from(Trade)) == 12
+        assert db.scalar(select(func.count()).select_from(Trade)) == 9
         assert db.scalar(select(func.count()).select_from(Order)) == 37

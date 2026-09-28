@@ -187,7 +187,7 @@ export default function ImportPage() {
               <div><dt>Source account</dt><dd>{preview.detected_accounts[0] ?? "Not detected"}</dd></div>
               <div><dt>Canonical trades</dt><dd>{preview.canonical_trades}</dd></div>
               <div><dt>Already imported</dt><dd>{preview.existing_trades}</dd></div>
-              <div><dt>Unmatched fills</dt><dd>{preview.unmatched_fills}</dd></div>
+              <div><dt>Open / unmatched fills</dt><dd>{preview.unmatched_fills}</dd></div>
               <div><dt>Linked filled orders</dt><dd>{preview.linked_filled_orders}</dd></div>
               <div><dt>Canceled/unfilled retained</dt><dd>{preview.canceled_unfilled_orders}</dd></div>
               <div><dt>Unmatched filled orders</dt><dd>{preview.unmatched_filled_orders}</dd></div>

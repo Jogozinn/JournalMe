@@ -7004,3 +7004,134 @@ input[type="datetime-local"] {
   .connector-principles { grid-template-columns: 1fr; }
   .broker-connection-list article { grid-template-columns: 1fr 1fr; }
 }
+
+/* NinjaTrader live ingestion feedback */
+.broker-live-shell {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 90;
+  display: grid;
+  justify-items: end;
+  gap: 10px;
+  pointer-events: none;
+}
+
+.broker-live-indicator,
+.broker-live-panel,
+.broker-live-toast { pointer-events: auto; }
+
+.broker-live-indicator {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--panel, var(--surface));
+  color: var(--text);
+  border-radius: 12px;
+  min-width: 184px;
+  padding: 9px 12px;
+  display: grid;
+  grid-template-columns: 9px 1fr;
+  align-items: center;
+  gap: 9px;
+  text-align: left;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .18);
+  cursor: pointer;
+}
+
+.broker-live-indicator > span:last-child { display: grid; gap: 1px; }
+.broker-live-indicator strong { font-size: 11px; line-height: 1.2; }
+.broker-live-indicator small { color: var(--muted); font-size: 9px; }
+.broker-live-status-dot,
+.broker-live-event-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #7f8792;
+  box-shadow: 0 0 0 3px rgba(127, 135, 146, .13);
+}
+.broker-live-indicator.live .broker-live-status-dot,
+.broker-live-indicator.live + * .broker-live-event-dot { background: #2aa36b; }
+.broker-live-indicator.retrying .broker-live-status-dot { background: #cf8b22; }
+.broker-live-indicator.error .broker-live-status-dot { background: #c94f55; }
+
+.broker-live-panel,
+.broker-live-toast {
+  width: min(390px, calc(100vw - 32px));
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel, var(--surface));
+  color: var(--text);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, .22);
+}
+
+.broker-live-panel { overflow: hidden; }
+.broker-live-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.broker-live-panel > header > div { display: grid; gap: 2px; }
+.broker-live-panel > header strong { font-size: 12px; }
+.broker-live-panel > header small { color: var(--muted); font-size: 9px; }
+.broker-live-panel > header a { font-size: 9px; color: var(--muted); }
+
+.broker-live-events { max-height: 330px; overflow: auto; }
+.broker-live-event {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.broker-live-event:last-child { border-bottom: 0; }
+.broker-live-event > div { display: grid; gap: 2px; min-width: 0; }
+.broker-live-event strong,
+.broker-live-event span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.broker-live-event strong { font-size: 10px; }
+.broker-live-event span { color: var(--muted); font-size: 9px; }
+.broker-live-event time { color: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.broker-live-event-dot { width: 6px; height: 6px; background: #2aa36b; box-shadow: none; }
+.broker-live-events > .muted { margin: 0; padding: 18px 14px; }
+
+.broker-live-toast {
+  position: relative;
+  padding: 14px 38px 14px 15px;
+  display: grid;
+  gap: 4px;
+  animation: broker-live-in .18s ease-out;
+}
+.broker-live-toast strong { font-size: 11px; }
+.broker-live-toast span { font-size: 12px; font-weight: 680; }
+.broker-live-toast small { color: var(--muted); font-size: 9px; }
+.broker-live-toast > a { margin-top: 4px; width: fit-content; font-size: 10px; font-weight: 700; }
+.broker-live-toast-close {
+  position: absolute;
+  top: 8px;
+  right: 9px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+}
+
+@keyframes broker-live-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 760px) {
+  .broker-live-shell { right: 12px; bottom: 82px; }
+  .broker-live-indicator { min-width: 164px; }
+  .broker-live-panel,
+  .broker-live-toast { width: min(360px, calc(100vw - 24px)); }
+}
+
+.trade-pnl-cell { display: grid; gap: 2px; justify-items: start; }
+.trade-pnl-cell small,
+.fees-pending { color: var(--muted); font-size: 8px; font-weight: 500; }
+.trade-lens-pnl .fees-pending { font-size: 9px; letter-spacing: 0; text-transform: none; }

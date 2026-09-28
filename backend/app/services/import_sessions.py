@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-import re
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
@@ -9,6 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     AccountType,
+    Attachment,
+    CaptureEvent,
     CashTransaction,
     DailyBalance,
     Fill,
@@ -16,7 +19,12 @@ from app.models import (
     ImportSession,
     ImportStatus,
     Order,
+    RuleViolation,
     Trade,
+    TradeChecklistResponse,
+    TradeJournal,
+    TradePlaybook,
+    TradeTag,
     TradingAccount,
     User,
     utcnow,
@@ -35,8 +43,203 @@ from app.services.importer import (
     row_get,
 )
 from app.services.capture_matching import reconcile_unmatched_captures
-from app.services.reconciliation import reconcile_completed_trades
+from app.services.instrument_identity import canonical_contract_key, root_symbol
+from app.services.reconciliation import CanonicalTrade, reconcile_completed_trades
 from app.storage import FileStorage
+
+
+MATCH_TIME_TOLERANCE_SECONDS = 3.0
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _split_external_ids(value: str | None) -> set[str]:
+    return {item.strip() for item in (value or "").split(",") if item.strip()}
+
+
+def _trade_fill_ids(trade: Trade) -> set[str]:
+    ids = _split_external_ids(trade.external_buy_fill_id) | _split_external_ids(
+        trade.external_sell_fill_id
+    )
+    payload = trade.source_payload or {}
+    for key in ("fill_ids",):
+        values = payload.get(key)
+        if isinstance(values, list):
+            ids.update(str(value) for value in values if value)
+    tradovate = payload.get("tradovate_reconciliation")
+    if isinstance(tradovate, dict):
+        values = tradovate.get("fill_ids")
+        if isinstance(values, list):
+            ids.update(str(value) for value in values if value)
+    return ids
+
+
+def _is_live_trade(trade: Trade) -> bool:
+    payload = trade.source_payload or {}
+    return (
+        trade.source_quality in {"broker_live", "multi_source_reconciled"}
+        or payload.get("source") == "broker_live"
+    )
+
+
+def _same_lifecycle(trade: Trade, item: CanonicalTrade) -> bool:
+    if trade.source_quality == "manual":
+        return False
+    if trade.side is not item.side or Decimal(trade.contract_quantity) != item.quantity:
+        return False
+    if canonical_contract_key(trade.symbol, trade.entry_timestamp) != canonical_contract_key(
+        item.symbol, item.entry_timestamp
+    ):
+        return False
+    price_tolerance = (item.tick_size or Decimal("0.00000001")) / Decimal("2")
+    if abs(Decimal(trade.entry_price) - item.entry_price) > price_tolerance:
+        return False
+    if abs(Decimal(trade.exit_price) - item.exit_price) > price_tolerance:
+        return False
+    if abs((_as_utc(trade.entry_timestamp) - _as_utc(item.entry_timestamp)).total_seconds()) > MATCH_TIME_TOLERANCE_SECONDS:
+        return False
+    if abs((_as_utc(trade.exit_timestamp) - _as_utc(item.exit_timestamp)).total_seconds()) > MATCH_TIME_TOLERANCE_SECONDS:
+        return False
+    return True
+
+
+def _legacy_components(trades: list[Trade], item: CanonicalTrade) -> list[Trade]:
+    result: list[Trade] = []
+    for trade in trades:
+        if _is_live_trade(trade) or trade.source_quality == "manual":
+            continue
+        fill_ids = _trade_fill_ids(trade)
+        if fill_ids and fill_ids.issubset(item.fill_ids):
+            result.append(trade)
+    return result
+
+
+def _find_preferred_existing_trade(
+    trades: list[Trade], item: CanonicalTrade
+) -> tuple[Trade | None, list[Trade]]:
+    lifecycle_matches = [trade for trade in trades if _same_lifecycle(trade, item)]
+    live_matches = [trade for trade in lifecycle_matches if _is_live_trade(trade)]
+    exact = next(
+        (trade for trade in trades if trade.duplicate_fingerprint == item.fingerprint),
+        None,
+    )
+    components = _legacy_components(trades, item)
+    if live_matches:
+        return live_matches[0], components
+    if exact is not None:
+        return exact, components
+    if lifecycle_matches:
+        return lifecycle_matches[0], components
+    if components:
+        # Keep an already-existing imported trade ID where possible. The chosen row
+        # is promoted to the flat-to-flat lifecycle and the other lot-pair rows are
+        # safely collapsed into it during commit.
+        return components[0], components
+    return None, components
+
+
+def _has_user_trade_content(db: Session, trade_id: Any) -> bool:
+    checks = (
+        TradeJournal,
+        TradeTag,
+        TradePlaybook,
+        TradeChecklistResponse,
+        Attachment,
+        RuleViolation,
+    )
+    for model in checks:
+        if db.scalar(select(model).where(model.trade_id == trade_id).limit(1)) is not None:
+            return True
+    return False
+
+
+def _merge_disposable_trade(db: Session, target: Trade, duplicate: Trade) -> bool:
+    if target.id == duplicate.id:
+        return True
+    if _has_user_trade_content(db, duplicate.id):
+        return False
+    for fill in db.scalars(select(Fill).where(Fill.trade_id == duplicate.id)).all():
+        fill.trade_id = target.id
+    for capture in db.scalars(
+        select(CaptureEvent).where(CaptureEvent.matched_trade_id == duplicate.id)
+    ).all():
+        capture.matched_trade_id = target.id
+    db.delete(duplicate)
+    db.flush()
+    return True
+
+
+def _join_external_ids(values: set[str]) -> str | None:
+    joined = ",".join(sorted(values))
+    return joined if joined and len(joined) <= 120 else None
+
+
+def _enrich_trade_from_import(
+    trade: Trade, item: CanonicalTrade, import_session: ImportSession
+) -> None:
+    was_live = _is_live_trade(trade)
+    payload = dict(trade.source_payload or {})
+    import_sessions = payload.get("import_session_ids")
+    if not isinstance(import_sessions, list):
+        import_sessions = []
+    session_id = str(import_session.id)
+    if session_id not in import_sessions:
+        import_sessions.append(session_id)
+    warnings = list(
+        dict.fromkeys(
+            [
+                *(payload.get("warnings") if isinstance(payload.get("warnings"), list) else []),
+                *item.warnings,
+            ]
+        )
+    )
+    payload.update(
+        {
+            "import_session_ids": import_sessions,
+            "tradovate_reconciliation": item.source_payload,
+            "canonical_contract": canonical_contract_key(item.symbol, item.entry_timestamp),
+            "warnings": warnings,
+        }
+    )
+
+    if not was_live:
+        trade.primary_import_session_id = trade.primary_import_session_id or import_session.id
+        trade.duplicate_fingerprint = item.fingerprint
+        trade.symbol = item.symbol
+    trade.external_position_id = item.external_position_id or trade.external_position_id
+    trade.external_pair_id = item.external_pair_id or trade.external_pair_id
+    trade.external_buy_fill_id = _join_external_ids(item.buy_fill_ids)
+    trade.external_sell_fill_id = _join_external_ids(item.sell_fill_ids)
+    trade.root_symbol = root_symbol(item.symbol)
+    trade.product = item.product or trade.product
+    trade.product_description = item.product_description or trade.product_description
+    trade.contract_quantity = item.quantity
+    trade.side = item.side
+    trade.entry_price = item.entry_price
+    trade.exit_price = item.exit_price
+    paired_rows = item.source_payload.get("paired_rows")
+    has_pnl_evidence = isinstance(paired_rows, list) and bool(paired_rows)
+    if has_pnl_evidence or not was_live:
+        trade.gross_pnl = item.gross_pnl
+    trade.fees = item.fees
+    trade.net_pnl = (
+        trade.gross_pnl - item.fees
+        if item.fees is not None
+        else (item.net_pnl if has_pnl_evidence or not was_live else trade.gross_pnl)
+    )
+    trade.currency = item.currency
+    trade.entry_timestamp = item.entry_timestamp
+    trade.exit_timestamp = item.exit_timestamp
+    trade.duration_seconds = item.duration_seconds
+    trade.tick_size = item.tick_size or trade.tick_size
+    trade.source_quality = "multi_source_reconciled" if was_live else item.source_quality
+    trade.reconciliation_status = item.reconciliation_status
+    trade.source_payload = payload
+
 
 
 def build_preview(
@@ -74,13 +277,15 @@ def build_preview(
         account_identity or str(account.id) if account else account_identity,
         account.timezone if account else "America/New_York",
     )
-    existing: set[str] = set()
+    existing_trade_rows: list[Trade] = []
     if account:
-        existing = set(
-            db.scalars(
-                select(Trade.duplicate_fingerprint).where(Trade.account_id == account.id)
-            ).all()
+        existing_trade_rows = list(
+            db.scalars(select(Trade).where(Trade.account_id == account.id)).all()
         )
+    existing_flags = [
+        _find_preferred_existing_trade(existing_trade_rows, trade)[0] is not None
+        for trade in canonical
+    ]
 
     paired_fill_ids = {fill_id for trade in canonical for fill_id in trade.fill_ids}
     all_fill_ids = {
@@ -134,13 +339,13 @@ def build_preview(
                     }
                 )
             )
-    identity_merges = max(
+    lifecycle_consolidations = max(
         0, max(paired_source_counts, default=0) - len(canonical)
     )
-    duplicate_rows = exact_duplicates + identity_merges
-    if identity_merges:
+    duplicate_rows = exact_duplicates
+    if lifecycle_consolidations:
         warnings.append(
-            f"{identity_merges} completed-trade row(s) were merged by shared fill identity."
+            f"{lifecycle_consolidations} paired lot row(s) were consolidated into flat-to-flat trade lifecycles."
         )
     return {
         "reports": [
@@ -161,8 +366,9 @@ def build_preview(
         },
         "detected_accounts": accounts,
         "canonical_trades": len(canonical),
-        "new_trades": sum(trade.fingerprint not in existing for trade in canonical),
-        "existing_trades": sum(trade.fingerprint in existing for trade in canonical),
+        "new_trades": sum(not flag for flag in existing_flags),
+        "existing_trades": sum(existing_flags),
+        "paired_rows_consolidated": lifecycle_consolidations,
         "duplicate_rows": duplicate_rows,
         "unmatched_fills": len(all_fill_ids - paired_fill_ids),
         "linked_filled_orders": linked_filled_orders,
@@ -263,24 +469,26 @@ def commit_import(
         reports, account.external_account_id or str(account.id), account.timezone
     )
     trade_by_fill: dict[str, Trade] = {}
+    existing_trades = list(
+        db.scalars(select(Trade).where(Trade.account_id == account.id)).all()
+    )
+    reconciled_trades = 0
+    collapsed_legacy_trades = 0
+    reconciliation_warnings: list[str] = []
+
     for item in canonical:
-        trade = db.scalar(
-            select(Trade).where(
-                Trade.account_id == account.id,
-                Trade.duplicate_fingerprint == item.fingerprint,
-            )
-        )
+        trade, components = _find_preferred_existing_trade(existing_trades, item)
         if trade is None:
             trade = Trade(
                 account_id=account.id,
                 primary_import_session_id=import_session.id,
                 external_position_id=item.external_position_id,
                 external_pair_id=item.external_pair_id,
-                external_buy_fill_id=",".join(sorted(item.buy_fill_ids)) or None,
-                external_sell_fill_id=",".join(sorted(item.sell_fill_ids)) or None,
+                external_buy_fill_id=_join_external_ids(item.buy_fill_ids),
+                external_sell_fill_id=_join_external_ids(item.sell_fill_ids),
                 duplicate_fingerprint=item.fingerprint,
                 symbol=item.symbol,
-                root_symbol=_root_symbol(item.symbol),
+                root_symbol=root_symbol(item.symbol),
                 product=item.product,
                 product_description=item.product_description,
                 contract_quantity=item.quantity,
@@ -297,11 +505,41 @@ def commit_import(
                 tick_size=item.tick_size,
                 source_quality=item.source_quality,
                 reconciliation_status=item.reconciliation_status,
-                source_payload=item.source_payload,
+                source_payload={
+                    **item.source_payload,
+                    "canonical_contract": canonical_contract_key(
+                        item.symbol, item.entry_timestamp
+                    ),
+                    "import_session_ids": [str(import_session.id)],
+                },
             )
             db.add(trade)
             db.flush()
+            existing_trades.append(trade)
             counts["trades"] += 1
+        else:
+            # The preferred target may be an existing live trade or one of the old
+            # Tradovate lot-pair rows. Collapse only duplicate rows that do not
+            # contain user-authored JournalMe content.
+            for component in list(components):
+                if component.id == trade.id:
+                    continue
+                if _merge_disposable_trade(db, trade, component):
+                    collapsed_legacy_trades += 1
+                    existing_trades = [
+                        candidate
+                        for candidate in existing_trades
+                        if candidate.id != component.id
+                    ]
+                else:
+                    reconciliation_warnings.append(
+                        "A legacy imported trade with journal content was preserved instead "
+                        "of being auto-collapsed. Review it manually after import."
+                    )
+            _enrich_trade_from_import(trade, item, import_session)
+            db.flush()
+            reconciled_trades += 1
+
         for fill_id in item.fill_ids:
             trade_by_fill[fill_id] = trade
 
@@ -327,6 +565,9 @@ def commit_import(
         **import_session.summary_json,
         "commit": counts,
         "account_id": str(account.id),
+        "reconciled_trades": reconciled_trades,
+        "collapsed_legacy_trades": collapsed_legacy_trades,
+        "reconciliation_warnings": list(dict.fromkeys(reconciliation_warnings)),
     }
     db.flush()
     # Newly imported canonical trades may resolve Companion captures recorded earlier.
@@ -346,12 +587,18 @@ def _persist_fills(
     for row in report.normalized_rows:
         if not isinstance(row, NormalizedFillRow):
             continue
-        if db.scalar(
-            select(Fill.id).where(
+        existing_fill = db.scalar(
+            select(Fill).where(
                 Fill.account_id == account.id,
                 Fill.external_fill_id == row.external_fill_id,
             )
-        ):
+        )
+        if existing_fill is not None:
+            target_trade = trade_by_fill.get(row.external_fill_id)
+            if target_trade is not None and existing_fill.trade_id != target_trade.id:
+                existing_fill.trade_id = target_trade.id
+            if existing_fill.commission is None and row.commission is not None:
+                existing_fill.commission = row.commission
             continue
         fill = Fill(
             account_id=account.id,
@@ -490,6 +737,3 @@ def _persist_balances(
         )
         created += 1
     return created
-
-def _root_symbol(symbol: str) -> str:
-    return re.sub(r"[FGHJKMNQUVXZ]\d{1,2}$", "", symbol) or symbol

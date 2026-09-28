@@ -8,6 +8,15 @@ import { EmptyState, ErrorState, PageHeader, Pnl, Skeleton } from "@/components/
 import { api, dateTime, duration, money, quantity } from "@/lib/api";
 import type { Trade } from "@/lib/types";
 
+
+function displayedPnl(trade: Trade): string {
+  return trade.fees === null ? trade.gross_pnl : trade.net_pnl;
+}
+
+function pnlLabel(trade: Trade): string {
+  return trade.fees === null ? "Gross P&L" : "Net P&L";
+}
+
 export default function TradesPage() {
   const { account, loading } = useAccount();
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -105,7 +114,7 @@ export default function TradesPage() {
         <>
           <section className="trade-table card premium-trade-table">
             <div className="trade-row trade-head">
-              <span>Trade</span><span>Entry</span><span>Side</span><span>Size</span><span>Duration</span><span>Net P&L</span>
+              <span>Trade</span><span>Entry</span><span>Side</span><span>Size</span><span>Duration</span><span>P&L</span>
             </div>
             {trades.map((trade, index) => (
               <button className="trade-row trade-row-button" type="button" onClick={() => setSelectedIndex(index)} key={trade.id}>
@@ -114,7 +123,7 @@ export default function TradesPage() {
                 <span><i className={`side-token ${trade.side}`}>{trade.side}</i></span>
                 <span className="mono">{quantity(trade.quantity)}</span>
                 <span>{duration(trade.duration_seconds)}</span>
-                <Pnl value={trade.net_pnl}>{money(trade.net_pnl)}</Pnl>
+                <span className="trade-pnl-cell"><Pnl value={displayedPnl(trade)}>{money(displayedPnl(trade))}</Pnl>{trade.fees === null && <small>fees pending</small>}</span>
               </button>
             ))}
           </section>
@@ -126,7 +135,7 @@ export default function TradesPage() {
                 <dl>
                   <div><dt>Quantity</dt><dd>{quantity(trade.quantity)}</dd></div>
                   <div><dt>Duration</dt><dd>{duration(trade.duration_seconds)}</dd></div>
-                  <div><dt>Net P&L</dt><dd><Pnl value={trade.net_pnl}>{money(trade.net_pnl)}</Pnl></dd></div>
+                  <div><dt>{pnlLabel(trade)}</dt><dd><Pnl value={displayedPnl(trade)}>{money(displayedPnl(trade))}</Pnl>{trade.fees === null && <small className="fees-pending">fees pending</small>}</dd></div>
                 </dl>
               </button>
             ))}
@@ -146,8 +155,9 @@ export default function TradesPage() {
               <button className="icon-button" type="button" onClick={() => setSelectedIndex(null)} aria-label="Close trade lens">×</button>
             </header>
             <div className="trade-lens-pnl">
-              <span>Net P&L</span>
-              <Pnl value={selectedTrade.net_pnl}>{money(selectedTrade.net_pnl)}</Pnl>
+              <span>{pnlLabel(selectedTrade)}</span>
+              <Pnl value={displayedPnl(selectedTrade)}>{money(displayedPnl(selectedTrade))}</Pnl>
+              {selectedTrade.fees === null && <small className="fees-pending">Fees pending from broker import</small>}
             </div>
             <dl className="trade-lens-stats">
               <div><dt>Size</dt><dd>{quantity(selectedTrade.quantity, true)}</dd></div>

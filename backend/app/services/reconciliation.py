@@ -11,6 +11,7 @@ from typing import Any
 
 from app.domain import TradeSide
 from app.services.importer import (
+    NormalizedFillRow,
     ParsedReport,
     ReportType,
     money,
@@ -18,6 +19,7 @@ from app.services.importer import (
     parse_duration,
     row_get,
 )
+from app.services.instrument_identity import canonical_contract_key
 
 
 @dataclass
@@ -49,7 +51,32 @@ class CanonicalTrade:
     source_payload: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class FillSlice:
+    fill: NormalizedFillRow
+    quantity: Decimal
+    role: str  # "open" or "close"
+
+
+@dataclass(frozen=True)
+class FillLifecycle:
+    slices: tuple[FillSlice, ...]
+    symbol: str
+    side: TradeSide
+    quantity: Decimal
+    entry_price: Decimal
+    exit_price: Decimal
+    entry_timestamp: datetime
+    exit_timestamp: datetime
+
+    @property
+    def fill_ids(self) -> set[str]:
+        return {item.fill.external_fill_id for item in self.slices}
+
+
 class DisjointSet:
+    """Fallback identity graph used for legacy imports that do not include Fills."""
+
     def __init__(self) -> None:
         self.parent: dict[str, str] = {}
 
@@ -84,13 +111,153 @@ def _paired_rows(reports: list[ParsedReport]) -> list[tuple[ReportType, dict[str
     return rows
 
 
+def _preferred_paired_rows(reports: list[ParsedReport]) -> list[dict[str, str]]:
+    position_rows = [
+        row
+        for report in reports
+        if report.report_type is ReportType.POSITION_HISTORY
+        for row in report.rows
+    ]
+    if position_rows:
+        return _unique_rows(position_rows)
+    performance_rows = [
+        row
+        for report in reports
+        if report.report_type is ReportType.PERFORMANCE
+        for row in report.rows
+    ]
+    return _unique_rows(performance_rows)
+
+
 def _fill_pair(row: dict[str, str]) -> tuple[str, str]:
     return row_get(row, "buyFillId", "Buy Fill ID"), row_get(
         row, "sellFillId", "Sell Fill ID"
     )
 
 
+def _normalized_fills(reports: list[ParsedReport]) -> list[NormalizedFillRow]:
+    seen: set[str] = set()
+    fills: list[NormalizedFillRow] = []
+    for report in reports:
+        if report.report_type is not ReportType.FILLS:
+            continue
+        for row in report.normalized_rows:
+            if not isinstance(row, NormalizedFillRow):
+                continue
+            if row.external_fill_id in seen:
+                continue
+            seen.add(row.external_fill_id)
+            fills.append(row)
+    return fills
+
+
+def _side_sign(action: str) -> int:
+    normalized = action.casefold()
+    if normalized in {"buy", "long"}:
+        return 1
+    if normalized in {"sell", "short"}:
+        return -1
+    raise ValueError(f"Unsupported fill action: {action}")
+
+
+def _weighted_fill_price(slices: Iterable[FillSlice], role: str) -> Decimal:
+    selected = [item for item in slices if item.role == role]
+    quantity = sum((item.quantity for item in selected), Decimal("0"))
+    if quantity <= 0:
+        return Decimal("0")
+    return sum(
+        (item.quantity * item.fill.price for item in selected), Decimal("0")
+    ) / quantity
+
+
+def _allocated_commission(item: FillSlice) -> Decimal | None:
+    if item.fill.commission is None or item.fill.quantity <= 0:
+        return None
+    return item.fill.commission * item.quantity / item.fill.quantity
+
+
+def _reconstruct_fill_lifecycles(fills: list[NormalizedFillRow]) -> list[FillLifecycle]:
+    """Reconstruct the trader-visible flat -> position -> flat lifecycle from fills.
+
+    Tradovate Performance/Position History rows are lot pairings. They are useful
+    enrichment evidence, but they are not the JournalMe trade boundary. Fills are
+    therefore grouped by canonical futures contract and position state first.
+    """
+    by_contract: dict[str, list[NormalizedFillRow]] = defaultdict(list)
+    for fill in fills:
+        by_contract[canonical_contract_key(fill.symbol, fill.timestamp)].append(fill)
+
+    completed: list[FillLifecycle] = []
+    for contract_fills in by_contract.values():
+        ordered = sorted(
+            contract_fills,
+            key=lambda item: (item.timestamp, item.row_number, item.external_fill_id),
+        )
+        position = Decimal("0")
+        active_slices: list[FillSlice] = []
+
+        def finalize() -> None:
+            nonlocal active_slices
+            open_slices = [item for item in active_slices if item.role == "open"]
+            close_slices = [item for item in active_slices if item.role == "close"]
+            opened = sum((item.quantity for item in open_slices), Decimal("0"))
+            closed = sum((item.quantity for item in close_slices), Decimal("0"))
+            if not open_slices or opened <= 0 or opened != closed:
+                return
+            entry_timestamp = min(item.fill.timestamp for item in open_slices)
+            exit_timestamp = max(item.fill.timestamp for item in close_slices)
+            completed.append(
+                FillLifecycle(
+                    slices=tuple(active_slices),
+                    symbol=open_slices[0].fill.symbol,
+                    side=(
+                        TradeSide.LONG
+                        if _side_sign(open_slices[0].fill.action) > 0
+                        else TradeSide.SHORT
+                    ),
+                    quantity=opened,
+                    entry_price=_weighted_fill_price(active_slices, "open"),
+                    exit_price=_weighted_fill_price(active_slices, "close"),
+                    entry_timestamp=entry_timestamp,
+                    exit_timestamp=exit_timestamp,
+                )
+            )
+            active_slices = []
+
+        for fill in ordered:
+            remaining = Decimal(fill.quantity)
+            event_side = _side_sign(fill.action)
+            while remaining > 0:
+                if position == 0:
+                    active_slices.append(FillSlice(fill, remaining, "open"))
+                    position = Decimal(event_side) * remaining
+                    remaining = Decimal("0")
+                    continue
+
+                position_side = 1 if position > 0 else -1
+                if event_side == position_side:
+                    active_slices.append(FillSlice(fill, remaining, "open"))
+                    position += Decimal(event_side) * remaining
+                    remaining = Decimal("0")
+                    continue
+
+                close_quantity = min(abs(position), remaining)
+                active_slices.append(FillSlice(fill, close_quantity, "close"))
+                position += Decimal(event_side) * close_quantity
+                remaining -= close_quantity
+                if position == 0:
+                    finalize()
+                    # A single reversal fill can close one lifecycle and open the next.
+                    continue
+
+    return sorted(completed, key=lambda item: item.entry_timestamp)
+
+
 def completed_trade_count(reports: list[ParsedReport]) -> int:
+    fills = _normalized_fills(reports)
+    if fills:
+        return len(_reconstruct_fill_lifecycles(fills))
+
     paired = _paired_rows(reports)
     dsu = DisjointSet()
     for _, row in paired:
@@ -110,6 +277,125 @@ def reconcile_completed_trades(
     account_identity: str,
     timezone_name: str = "America/New_York",
 ) -> list[CanonicalTrade]:
+    fills = _normalized_fills(reports)
+    if fills:
+        return _reconcile_fill_lifecycles(reports, fills, account_identity)
+    return _reconcile_paired_rows(reports, account_identity, timezone_name)
+
+
+def _reconcile_fill_lifecycles(
+    reports: list[ParsedReport],
+    fills: list[NormalizedFillRow],
+    account_identity: str,
+) -> list[CanonicalTrade]:
+    paired_rows = _preferred_paired_rows(reports)
+    lifecycles = _reconstruct_fill_lifecycles(fills)
+    result: list[CanonicalTrade] = []
+
+    for lifecycle in lifecycles:
+        fill_ids = lifecycle.fill_ids
+        matched_rows = []
+        for row in paired_rows:
+            buy_id, sell_id = _fill_pair(row)
+            if buy_id and sell_id and buy_id in fill_ids and sell_id in fill_ids:
+                matched_rows.append(row)
+
+        gross_pnl = sum(
+            (
+                money(row_get(row, "P/L", "pnl"), required=False)
+                or Decimal("0")
+            )
+            for row in matched_rows
+        )
+        commissions = [_allocated_commission(item) for item in lifecycle.slices]
+        fees = (
+            sum((value or Decimal("0") for value in commissions), Decimal("0"))
+            if commissions and all(value is not None for value in commissions)
+            else None
+        )
+        warnings: list[str] = []
+        if not matched_rows:
+            warnings.append(
+                "No paired P&L rows matched this flat-to-flat fill lifecycle; gross P&L could not be enriched."
+            )
+        if fees is None:
+            warnings.append("One or more fill commissions were unavailable.")
+
+        buy_ids = {
+            item.fill.external_fill_id
+            for item in lifecycle.slices
+            if _side_sign(item.fill.action) > 0
+        }
+        sell_ids = {
+            item.fill.external_fill_id
+            for item in lifecycle.slices
+            if _side_sign(item.fill.action) < 0
+        }
+        all_ids = buy_ids | sell_ids
+        first_open = next(item.fill for item in lifecycle.slices if item.role == "open")
+        pair_ids = {row_get(row, "Pair ID") for row in matched_rows if row_get(row, "Pair ID")}
+        position_ids = {
+            row_get(row, "Position ID")
+            for row in matched_rows
+            if row_get(row, "Position ID")
+        }
+        currencies = [row_get(row, "Currency") for row in matched_rows if row_get(row, "Currency")]
+        tick_size = money(row_get(first_open.source_payload, "_tickSize"), required=False)
+        fill_identity = ",".join(sorted(all_ids))
+        fingerprint_source = f"{account_identity}|fills|{fill_identity}"
+        fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()
+        net_pnl = gross_pnl - fees if fees is not None else gross_pnl
+        status = "reconciled" if matched_rows and not warnings else "warning"
+
+        result.append(
+            CanonicalTrade(
+                fingerprint=fingerprint,
+                fill_ids=all_ids,
+                buy_fill_ids=buy_ids,
+                sell_fill_ids=sell_ids,
+                symbol=lifecycle.symbol,
+                side=lifecycle.side,
+                quantity=lifecycle.quantity,
+                entry_price=lifecycle.entry_price,
+                exit_price=lifecycle.exit_price,
+                gross_pnl=gross_pnl,
+                fees=fees,
+                net_pnl=net_pnl,
+                entry_timestamp=lifecycle.entry_timestamp,
+                exit_timestamp=lifecycle.exit_timestamp,
+                duration_seconds=max(
+                    0,
+                    int((lifecycle.exit_timestamp - lifecycle.entry_timestamp).total_seconds()),
+                ),
+                tick_size=tick_size,
+                currency=currencies[0] if currencies else "USD",
+                product=first_open.product,
+                product_description=first_open.product_description,
+                external_position_id=(next(iter(position_ids)) if len(position_ids) == 1 else None),
+                external_pair_id=(next(iter(pair_ids)) if len(pair_ids) == 1 else None),
+                source_quality="fills_lifecycle",
+                reconciliation_status=status,
+                warnings=warnings,
+                source_payload={
+                    "source": "tradovate_fill_lifecycle",
+                    "fill_ids": sorted(all_ids),
+                    "paired_rows": matched_rows,
+                    "canonical_contract": canonical_contract_key(
+                        lifecycle.symbol, lifecycle.entry_timestamp
+                    ),
+                    "warnings": warnings,
+                },
+            )
+        )
+    return result
+
+
+def _reconcile_paired_rows(
+    reports: list[ParsedReport],
+    account_identity: str,
+    timezone_name: str,
+) -> list[CanonicalTrade]:
+    """Legacy fallback when a historical import does not contain a Fills report."""
     paired = _paired_rows(reports)
     dsu = DisjointSet()
     keyed_rows: list[tuple[str, ReportType, dict[str, str]]] = []
@@ -128,25 +414,15 @@ def reconcile_completed_trades(
     for key, report_type, row in keyed_rows:
         groups[dsu.find(key)].append((report_type, row))
 
-    fill_rows: dict[str, dict[str, str]] = {}
-    for report in reports:
-        if report.report_type is ReportType.FILLS:
-            for row in report.rows:
-                fill_id = row_get(row, "Fill ID", "_id")
-                if fill_id:
-                    fill_rows[fill_id] = row
-
-    result: list[CanonicalTrade] = []
-    for rows in groups.values():
-        result.append(
-            _canonicalize_group(rows, fill_rows, account_identity, timezone_name)
-        )
+    result = [
+        _canonicalize_legacy_group(rows, account_identity, timezone_name)
+        for rows in groups.values()
+    ]
     return sorted(result, key=lambda item: item.entry_timestamp)
 
 
-def _canonicalize_group(
+def _canonicalize_legacy_group(
     typed_rows: list[tuple[ReportType, dict[str, str]]],
-    fill_rows: dict[str, dict[str, str]],
     account_identity: str,
     timezone_name: str,
 ) -> CanonicalTrade:
@@ -159,8 +435,6 @@ def _canonicalize_group(
     buy_ids = {buy for row in preferred if (buy := _fill_pair(row)[0])}
     sell_ids = {sell for row in preferred if (sell := _fill_pair(row)[1])}
     all_ids = buy_ids | sell_ids
-    linked_fills = [fill_rows[fill_id] for fill_id in all_ids if fill_id in fill_rows]
-
     bought_times = [
         parse_datetime(row_get(row, "Bought Timestamp", "boughtTimestamp"), timezone_name)
         for row in preferred
@@ -173,7 +447,6 @@ def _canonicalize_group(
     side = TradeSide.LONG if earliest_buy < earliest_sell else TradeSide.SHORT
     entry_timestamp = min(bought_times + sold_times)
     exit_timestamp = max(bought_times + sold_times)
-
     gross_rows = position_rows or performance_rows
     gross_pnl = sum(
         (money(row_get(row, "P/L", "pnl")) or Decimal("0")) for row in gross_rows
@@ -182,16 +455,7 @@ def _canonicalize_group(
         (money(row_get(row, "Paired Qty", "qty")) or Decimal("0")) for row in gross_rows
     )
 
-    def weighted_price(action: str, fallback_name: str) -> Decimal:
-        candidates = [
-            (money(row_get(row, "Quantity")) or Decimal("0"), money(row_get(row, "Price")))
-            for row in linked_fills
-            if row_get(row, "B/S", "_action").lower() == action
-        ]
-        if candidates and sum(qty for qty, _ in candidates) > 0:
-            return sum(qty * (price or Decimal("0")) for qty, price in candidates) / sum(
-                qty for qty, _ in candidates
-            )
+    def weighted_price(fallback_name: str) -> Decimal:
         values = [
             (
                 money(row_get(row, "Paired Qty", "qty")) or Decimal("0"),
@@ -199,37 +463,14 @@ def _canonicalize_group(
             )
             for row in gross_rows
         ]
-        return sum(qty * (price or Decimal("0")) for qty, price in values) / sum(
-            qty for qty, _ in values
-        )
+        total = sum(qty for qty, _ in values)
+        return sum(qty * (price or Decimal("0")) for qty, price in values) / total
 
-    buy_price = weighted_price("buy", "Buy Price" if position_rows else "buyPrice")
-    sell_price = weighted_price("sell", "Sell Price" if position_rows else "sellPrice")
+    buy_price = weighted_price("Buy Price" if position_rows else "buyPrice")
+    sell_price = weighted_price("Sell Price" if position_rows else "sellPrice")
     entry_price, exit_price = (
         (buy_price, sell_price) if side is TradeSide.LONG else (sell_price, buy_price)
     )
-    commissions = [
-        money(row_get(row, "commission"), required=False) for row in linked_fills
-    ]
-    fees = (
-        sum((value or Decimal("0")) for value in commissions)
-        if linked_fills and any(value is not None for value in commissions)
-        else None
-    )
-    net_pnl = gross_pnl - fees if fees is not None else gross_pnl
-
-    warnings: list[str] = []
-    if len(linked_fills) != len(all_ids):
-        warnings.append(f"{len(all_ids) - len(linked_fills)} referenced fill(s) were not found.")
-    if position_rows and performance_rows:
-        performance_gross = sum(
-            (money(row_get(row, "pnl")) or Decimal("0")) for row in performance_rows
-        )
-        if performance_gross != gross_pnl:
-            warnings.append(
-                f"Position gross P&L {gross_pnl} differs from Performance {performance_gross}."
-            )
-
     fill_identity = ",".join(sorted(all_ids))
     fingerprint_source = (
         f"{account_identity}|fills|{fill_identity}"
@@ -246,47 +487,44 @@ def _canonicalize_group(
             ]
         )
     )
-    fingerprint = hashlib.sha256(fingerprint_source.encode()).hexdigest()
     durations = [
         parse_duration(row_get(row, "duration"))
         for row in performance_rows
         if row_get(row, "duration")
     ]
-    duration_seconds = (
-        max(durations)
-        if durations
-        else int((exit_timestamp - entry_timestamp).total_seconds())
-    )
     first = preferred[0]
-    symbol = row_get(first, "symbol", "Contract")
     return CanonicalTrade(
-        fingerprint=fingerprint,
+        fingerprint=hashlib.sha256(fingerprint_source.encode()).hexdigest(),
         fill_ids=all_ids,
         buy_fill_ids=buy_ids,
         sell_fill_ids=sell_ids,
-        symbol=symbol,
+        symbol=row_get(first, "symbol", "Contract"),
         side=side,
         quantity=quantity,
         entry_price=entry_price,
         exit_price=exit_price,
         gross_pnl=gross_pnl,
-        fees=fees,
-        net_pnl=net_pnl,
+        fees=None,
+        net_pnl=gross_pnl,
         entry_timestamp=entry_timestamp,
         exit_timestamp=exit_timestamp,
-        duration_seconds=duration_seconds,
+        duration_seconds=(
+            max(value for value in durations if value is not None)
+            if any(value is not None for value in durations)
+            else int((exit_timestamp - entry_timestamp).total_seconds())
+        ),
         tick_size=money(row_get(first, "_tickSize"), required=False),
         currency=row_get(first, "Currency") or "USD",
         product=row_get(first, "Product") or None,
         product_description=row_get(first, "Product Description") or None,
         external_position_id=row_get(first, "Position ID") or None,
         external_pair_id=row_get(first, "Pair ID") or None,
-        source_quality="fills_enriched" if linked_fills else "paired_report",
-        reconciliation_status="warning" if warnings else "reconciled",
-        warnings=warnings,
+        source_quality="paired_report",
+        reconciliation_status="warning",
+        warnings=["Fills report was unavailable; trade boundaries use legacy paired-report reconciliation."],
         source_payload={
             "paired_rows": [row for _, row in typed_rows],
             "fill_ids": sorted(all_ids),
-            "warnings": warnings,
+            "warnings": ["Fills report was unavailable; trade boundaries use legacy paired-report reconciliation."],
         },
     )

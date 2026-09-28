@@ -158,6 +158,15 @@ def test_live_execution_round_trip_materializes_trade_and_deduplicates() -> None
     assert stored_connection is not None
     assert stored_connection.last_sync_at is not None
 
+    activity = client.get(f"/api/v1/broker-activity?account_id={account.id}")
+    assert activity.status_code == 200, activity.text
+    body = activity.json()
+    assert len(body["connections"]) == 1
+    assert body["events"][0]["external_execution_id"] == "671242171301_1"
+    assert body["events"][0]["root_symbol"] == "MNQ"
+    assert body["events"][0]["completed_trade"]["id"] == str(trade.id)
+    assert body["events"][0]["completed_trade"]["fees"] is None
+
 
 def test_partial_exit_round_trip_uses_weighted_exit_price() -> None:
     client, db, _, account = _client()
