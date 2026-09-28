@@ -201,3 +201,100 @@ def test_ledger_merges_live_execution_lifecycle_with_import_fill_lifecycle() -> 
         assert rows[0].net_pnl == Decimal("-114.5")
         assert set(rows[0].source_payload["ledger_fill_ids"]) == {"tv-b2", "tv-s2"}
         assert "nt-s2" not in rows[0].source_payload["ledger_fill_ids"]
+
+
+def test_authoritative_import_fills_remove_phantom_live_bridge_lifecycle() -> None:
+    """An incomplete live stream must not invent a trade between real broker trades.
+
+    If the bridge starts after a real short trade is already open, the first live
+    event may be that trade's BUY-to-flat. A naive flat-state reconstruction can
+    mistake that exit for a new long entry and pair it with the next SELL entry.
+    Complete Tradovate fill history is authoritative for that covered interval.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(email="phantom@example.com", display_name="Phantom")
+        db.add(user); db.flush()
+        account = TradingAccount(user_id=user.id, name="Evaluation", provider="tradovate")
+        db.add(account); db.flush()
+        connection = BrokerConnection(
+            user_id=user.id,
+            account_id=account.id,
+            provider="ninjatrader",
+            connection_type="desktop_bridge",
+            display_name="NT",
+            status="connected",
+        )
+        db.add(connection); db.flush()
+        session = ImportSession(user_id=user.id, account_id=account.id)
+        db.add(session); db.flush()
+        source = ImportFile(
+            import_session_id=session.id,
+            filename="Fills.csv",
+            detected_report_type="fills",
+            content_hash="phantom-hash",
+            stored_path="x",
+            header_signature="x",
+        )
+        db.add(source); db.flush()
+
+        # Two real broker trades from the authoritative fill stream.
+        real_rows = [
+            Fill(account_id=account.id, import_file_id=source.id, external_fill_id="t1-s1", external_order_id="o1", symbol="MNQZ6", action="Sell", quantity=Decimal("1"), price=Decimal("30785.25"), commission=Decimal("0.5"), timestamp=datetime(2026,9,28,1,25,2,tzinfo=timezone.utc), trade_date=date(2026,9,28), source_payload={}),
+            Fill(account_id=account.id, import_file_id=source.id, external_fill_id="t1-s2", external_order_id="o1", symbol="MNQZ6", action="Sell", quantity=Decimal("1"), price=Decimal("30785.00"), commission=Decimal("0.5"), timestamp=datetime(2026,9,28,1,25,2,tzinfo=timezone.utc), trade_date=date(2026,9,28), source_payload={}),
+            Fill(account_id=account.id, import_file_id=source.id, external_fill_id="t1-b", external_order_id="o2", symbol="MNQZ6", action="Buy", quantity=Decimal("2"), price=Decimal("30813.25"), commission=Decimal("1"), timestamp=datetime(2026,9,28,1,30,12,tzinfo=timezone.utc), trade_date=date(2026,9,28), source_payload={}),
+            Fill(account_id=account.id, import_file_id=source.id, external_fill_id="t2-s", external_order_id="o3", symbol="MNQZ6", action="Sell", quantity=Decimal("20"), price=Decimal("30723.25"), commission=Decimal("10"), timestamp=datetime(2026,9,28,2,18,43,tzinfo=timezone.utc), trade_date=date(2026,9,28), source_payload={}),
+            Fill(account_id=account.id, import_file_id=source.id, external_fill_id="t2-b", external_order_id="o4", symbol="MNQZ6", action="Buy", quantity=Decimal("20"), price=Decimal("30723.50"), commission=Decimal("10"), timestamp=datetime(2026,9,28,2,19,8,tzinfo=timezone.utc), trade_date=date(2026,9,28), source_payload={}),
+        ]
+        db.add_all(real_rows); db.flush()
+
+        # Performance rows for the two real trades.
+        t1a = _trade(account.id, buy="t1-b", sell="t1-s1", qty="1", pnl="-56", entry="2026-09-28T01:25:02", exit="2026-09-28T01:30:12")
+        t1a.entry_price = Decimal("30785.25"); t1a.exit_price = Decimal("30813.25")
+        t1b = _trade(account.id, buy="t1-b", sell="t1-s2", qty="1", pnl="-56.5", entry="2026-09-28T01:25:02", exit="2026-09-28T01:30:12")
+        t1b.entry_price = Decimal("30785.00"); t1b.exit_price = Decimal("30813.25")
+        t2 = _trade(account.id, buy="t2-b", sell="t2-s", qty="20", pnl="-10", entry="2026-09-28T02:18:43", exit="2026-09-28T02:19:08")
+        t2.entry_price = Decimal("30723.25"); t2.exit_price = Decimal("30723.50")
+        db.add_all([t1a, t1b, t2]); db.flush()
+
+        # Incomplete live stream begins with the first trade's EXIT and then sees
+        # the next trade's ENTRY. The naive live-only state machine produces a
+        # false LONG lifecycle from 1:30 -> 2:18.
+        db.add_all([
+            BrokerExecutionEvent(user_id=user.id, account_id=account.id, connection_id=connection.id, provider="ninjatrader", external_execution_id="nt-exit-old", symbol="MNQ 12-26", side="Buy", quantity=Decimal("2"), price=Decimal("30813.25"), commission=None, point_value=Decimal("2"), currency="USD", executed_at=datetime(2026,9,28,1,30,12,tzinfo=timezone.utc), source_payload={}),
+            BrokerExecutionEvent(user_id=user.id, account_id=account.id, connection_id=connection.id, provider="ninjatrader", external_execution_id="nt-entry-next", symbol="MNQ 12-26", side="Sell", quantity=Decimal("20"), price=Decimal("30723.25"), commission=None, point_value=Decimal("2"), currency="USD", executed_at=datetime(2026,9,28,2,18,43,tzinfo=timezone.utc), source_payload={}),
+        ])
+        phantom = Trade(
+            account_id=account.id,
+            duplicate_fingerprint="phantom-live",
+            symbol="MNQ 12-26",
+            root_symbol="MNQ",
+            contract_quantity=Decimal("2"),
+            side=TradeSide.LONG,
+            entry_price=Decimal("30813.25"),
+            exit_price=Decimal("30723.25"),
+            gross_pnl=Decimal("-360"),
+            fees=None,
+            net_pnl=Decimal("-360"),
+            entry_timestamp=datetime(2026,9,28,1,30,12,tzinfo=timezone.utc),
+            exit_timestamp=datetime(2026,9,28,2,18,43,tzinfo=timezone.utc),
+            duration_seconds=2911,
+            source_quality="broker_live",
+            reconciliation_status="live_fees_pending",
+            source_payload={"source":"broker_live", "execution_ids":["nt-exit-old", "nt-entry-next"]},
+        )
+        db.add(phantom); db.flush()
+
+        report = reconcile_trade_ledger(db, account)
+        rows = list(db.scalars(select(Trade).where(Trade.account_id == account.id).order_by(Trade.entry_timestamp)).all())
+
+        assert report["suppressed_by_authoritative_fills"] >= 1
+        assert report["unresolved_nonmanual_trade_rows"] == 0
+        assert len(rows) == 2
+        assert all(row.source_quality == "ledger_reconciled" for row in rows)
+        assert rows[0].contract_quantity == Decimal("2")
+        assert rows[0].fees == Decimal("2")
+        assert rows[0].net_pnl == Decimal("-114.5")
+        assert rows[1].contract_quantity == Decimal("20")
+        assert rows[1].fees == Decimal("20")

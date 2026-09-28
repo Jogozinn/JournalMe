@@ -228,15 +228,17 @@ def _trip_execution_ids(trip: Any) -> set[str]:
     return {str(item.event.external_execution_id) for item in trip.slices if item.event.external_execution_id}
 
 
-def _repair_live_group(db: Session, group: list[Trade], trip: Any) -> tuple[int, dict[str, Any] | None]:
+def _repair_live_group(
+    db: Session, group: list[Trade], trip: Any
+) -> tuple[int, dict[str, Any] | None, Trade | None]:
     if not group:
-        return 0, None
+        return 0, None, None
     content_rows = [row for row in group if _has_user_content(db, row.id)]
     if len(content_rows) > 1:
         return 0, {
             "trade_ids": [str(item.id) for item in group],
             "reason": "multiple_live_duplicate_rows_have_user_content",
-        }
+        }, None
     execution_ids = _trip_execution_ids(trip)
     target = max(
         group,
@@ -281,12 +283,12 @@ def _repair_live_group(db: Session, group: list[Trade], trip: Any) -> tuple[int,
             return collapsed, {
                 "trade_ids": [str(item.id) for item in group],
                 "reason": "live_duplicate_user_content_race",
-            }
+            }, target
         _move_safe_relations(db, target, duplicate)
         db.delete(duplicate)
         collapsed += 1
     db.flush()
-    return collapsed, None
+    return collapsed, None, target
 
 
 def _same_lifecycle_trade(left: Trade, right: Trade) -> bool:
@@ -379,15 +381,15 @@ def _repair_group(
     group: list[Trade],
     *,
     lifecycle: PersistedLifecycle | None,
-) -> tuple[int, dict[str, Any] | None]:
-    if len(group) <= 1:
-        return 0, None
+) -> tuple[int, dict[str, Any] | None, Trade | None]:
+    if not group:
+        return 0, None, None
     content_rows = [row for row in group if _has_user_content(db, row.id)]
     if len(content_rows) > 1:
         return 0, {
             "trade_ids": [str(item.id) for item in group],
             "reason": "multiple_duplicate_rows_have_user_content",
-        }
+        }, None
 
     union_ids: set[str] = set()
     if lifecycle is not None:
@@ -465,12 +467,12 @@ def _repair_group(
             return collapsed, {
                 "trade_ids": [str(item.id) for item in group],
                 "reason": "duplicate_user_content_race",
-            }
+            }, target
         _move_safe_relations(db, target, duplicate)
         db.delete(duplicate)
         collapsed += 1
     db.flush()
-    return collapsed, None
+    return collapsed, None, target
 
 
 def reconcile_trade_ledger(db: Session, account: TradingAccount) -> dict[str, Any]:
@@ -530,7 +532,7 @@ def reconcile_trade_ledger(db: Session, account: TradingAccount) -> dict[str, An
         if not group:
             continue
         used_trade_ids.update(trade.id for trade in group)
-        count, conflict = _repair_live_group(db, group, trip)
+        count, conflict, _target = _repair_live_group(db, group, trip)
         collapsed += count
         repaired_groups += int(count > 0 or len(group) == 1)
         if conflict:
@@ -541,6 +543,7 @@ def reconcile_trade_ledger(db: Session, account: TradingAccount) -> dict[str, An
     # so Tradovate can enrich it with fees.
     active = [row for row in active if db.get(Trade, row.id) is not None]
     used_trade_ids.clear()
+    authoritative_import_trade_ids: set[UUID] = set()
     for lifecycle in lifecycles:
         fill_components = [
             trade
@@ -573,14 +576,91 @@ def reconcile_trade_ledger(db: Session, account: TradingAccount) -> dict[str, An
         ]
         group = list({trade.id: trade for trade in [*linked_trades, *fill_components, *lifecycle_matches]}.values())
         if not group:
+            conflicts.append({
+                "reason": "authoritative_fill_lifecycle_has_no_trade_row",
+                "symbol": lifecycle.symbol,
+                "entry_timestamp": lifecycle.entry_timestamp.isoformat(),
+                "exit_timestamp": lifecycle.exit_timestamp.isoformat(),
+                "fill_ids": sorted(lifecycle.fill_ids),
+            })
             continue
         used_trade_ids.update(trade.id for trade in group)
-        if len(group) > 1 or not any(trade_import_fill_ids(row) == lifecycle.fill_ids for row in group):
-            count, conflict = _repair_group(db, group, lifecycle=lifecycle)
-            collapsed += count
-            repaired_groups += int(count > 0)
-            if conflict:
-                conflicts.append(conflict)
+        count, conflict, target = _repair_group(db, group, lifecycle=lifecycle)
+        collapsed += count
+        repaired_groups += int(target is not None)
+        if conflict:
+            conflicts.append(conflict)
+        if target is not None:
+            authoritative_import_trade_ids.add(target.id)
+            for item in lifecycle.slices:
+                item.fill.trade_id = target.id
+
+    # Tradovate fills are authoritative inside the time span they cover. A
+    # partial live stream can otherwise invent "phantom" round trips by
+    # interpreting a real exit as a new entry and the next real entry as its
+    # exit. Suppress those machine-generated rows whenever complete imported
+    # fill evidence covers the same contract/time window.
+    coverage_by_contract: dict[str, tuple[datetime, datetime]] = {}
+    for fill in fills:
+        key = canonical_contract_key(fill.symbol, fill.timestamp)
+        current = coverage_by_contract.get(key)
+        ts = _as_utc_naive(fill.timestamp)
+        if current is None:
+            coverage_by_contract[key] = (ts, ts)
+        else:
+            coverage_by_contract[key] = (min(current[0], ts), max(current[1], ts))
+
+    suppressed_by_authoritative_fills = 0
+    current_rows = list(db.scalars(select(Trade).where(Trade.account_id == account.id)).all())
+    for row in current_rows:
+        if row.source_quality == "manual" or row.id in authoritative_import_trade_ids:
+            continue
+        key = canonical_contract_key(row.symbol, row.entry_timestamp)
+        coverage = coverage_by_contract.get(key)
+        if coverage is None:
+            continue
+        start, end = coverage
+        entry = _as_utc_naive(row.entry_timestamp)
+        exit_at = _as_utc_naive(row.exit_timestamp)
+        tolerance_seconds = 5
+        inside_authoritative_window = (
+            entry.timestamp() >= start.timestamp() - tolerance_seconds
+            and exit_at.timestamp() <= end.timestamp() + tolerance_seconds
+        )
+        if not inside_authoritative_window:
+            continue
+        if _has_user_content(db, row.id):
+            conflicts.append({
+                "trade_ids": [str(row.id)],
+                "reason": "noncanonical_trade_has_user_content_in_authoritative_fill_window",
+            })
+            continue
+        # Fill links have already been reassigned to the authoritative lifecycle
+        # targets above. Preserve capture matching only when there is a unique
+        # nearest canonical trade on the same contract.
+        canonical_candidates = [
+            candidate
+            for candidate in current_rows
+            if candidate.id in authoritative_import_trade_ids
+            and canonical_contract_key(candidate.symbol, candidate.entry_timestamp) == key
+        ]
+        if canonical_candidates:
+            nearest = min(
+                canonical_candidates,
+                key=lambda candidate: min(
+                    abs((_as_utc_naive(candidate.entry_timestamp) - entry).total_seconds()),
+                    abs((_as_utc_naive(candidate.exit_timestamp) - exit_at).total_seconds()),
+                ),
+            )
+            for capture in db.scalars(
+                select(CaptureEvent).where(CaptureEvent.matched_trade_id == row.id)
+            ).all():
+                capture.matched_trade_id = nearest.id
+        db.delete(row)
+        collapsed += 1
+        suppressed_by_authoritative_fills += 1
+
+    db.flush()
 
     # Catch duplicate live/import rows that are identical but have different
     # source execution IDs and no imported fill evidence yet.
@@ -601,7 +681,7 @@ def reconcile_trade_ledger(db: Session, account: TradingAccount) -> dict[str, An
                 group.append(other)
         seen.update(item.id for item in group)
         if len(group) > 1:
-            count, conflict = _repair_group(db, group, lifecycle=None)
+            count, conflict, _target = _repair_group(db, group, lifecycle=None)
             collapsed += count
             repaired_groups += int(count > 0)
             if conflict:
@@ -622,6 +702,7 @@ def reconcile_trade_ledger(db: Session, account: TradingAccount) -> dict[str, An
         "repaired_groups": repaired_groups,
         "fill_lifecycles": len(lifecycles),
         "live_lifecycles": len(live_trips),
+        "suppressed_by_authoritative_fills": suppressed_by_authoritative_fills,
         "unresolved_nonmanual_trade_rows": len(unresolved_nonmanual),
         "conflicts": conflicts,
         "status": "needs_attention" if conflicts or unresolved_nonmanual else "reconciled",

@@ -22,7 +22,7 @@ export default function DataSettingsPage() {
   const [status, setStatus] = useState<BackupStatus | null>(null);
   const [error, setError] = useState("");
   const [reconciling, setReconciling] = useState(false);
-  const [ledgerResult, setLedgerResult] = useState<{ before_trade_rows: number; after_trade_rows: number; collapsed_trade_rows: number; repaired_groups: number; fill_lifecycles: number; live_lifecycles: number; unresolved_nonmanual_trade_rows: number; conflicts: unknown[]; status: string } | null>(null);
+  const [ledgerResult, setLedgerResult] = useState<{ before_trade_rows: number; after_trade_rows: number; collapsed_trade_rows: number; repaired_groups: number; fill_lifecycles: number; live_lifecycles: number; suppressed_by_authoritative_fills: number; unresolved_nonmanual_trade_rows: number; conflicts: unknown[]; status: string } | null>(null);
   useEffect(() => {
     api<BackupStatus>("/backup-status")
       .then(setStatus)
@@ -63,6 +63,7 @@ export default function DataSettingsPage() {
         {ledgerResult && <div style={{ marginTop: "0.75rem" }}>
           <p><strong>{ledgerResult.before_trade_rows} → {ledgerResult.after_trade_rows} trade rows.</strong> Collapsed {ledgerResult.collapsed_trade_rows} duplicates across {ledgerResult.repaired_groups} lifecycle groups.</p>
           <p className="muted">Authoritative evidence: {ledgerResult.fill_lifecycles} Tradovate fill lifecycle(s) · {ledgerResult.live_lifecycles} NinjaTrader live lifecycle(s).</p>
+          {ledgerResult.suppressed_by_authoritative_fills > 0 && <p className="muted">Removed {ledgerResult.suppressed_by_authoritative_fills} machine-generated live/legacy row(s) that conflicted with complete Tradovate fill evidence.</p>}
           {ledgerResult.unresolved_nonmanual_trade_rows > 0 ? <p><strong>Needs attention:</strong> {ledgerResult.unresolved_nonmanual_trade_rows} non-manual trade row(s) are still outside the canonical ledger. Do not trust Analytics/Intelligence until these are resolved.</p> : <p>No unresolved legacy trade rows remain.</p>}
           {ledgerResult.conflicts.length > 0 && <p>{ledgerResult.conflicts.length} reviewed conflict(s) were preserved for manual review.</p>}
         </div>}
