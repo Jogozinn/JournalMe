@@ -11,6 +11,7 @@ import type { Metrics } from "@/lib/types";
 type CalendarPayload = {
   year: number;
   month: number;
+  date_mode: "trading" | "calendar";
   days: {
     date: string;
     net_pnl: string;
@@ -32,19 +33,31 @@ export default function CalendarPage() {
   const [data, setData] = useState<CalendarPayload | null>(null);
   const [yearData, setYearData] = useState<CalendarPayload[]>([]);
   const [view, setView] = useState<"month" | "week" | "year">("month");
+  const [dateMode, setDateMode] = useState<"trading" | "calendar">("trading");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("journalme-date-mode");
+    if (saved === "calendar" || saved === "trading") setDateMode(saved);
+  }, []);
+
+  function changeDateMode(next: "trading" | "calendar") {
+    setDateMode(next);
+    window.localStorage.setItem("journalme-date-mode", next);
+  }
+
   useEffect(() => {
     if (!account) return;
     const requests = view === "year"
-      ? Array.from({ length: 12 }, (_, index) => api<CalendarPayload>(`/calendar?account_id=${account.id}&year=${month.getFullYear()}&month=${index + 1}`))
-      : [api<CalendarPayload>(`/calendar?account_id=${account.id}&year=${month.getFullYear()}&month=${month.getMonth() + 1}`)];
+      ? Array.from({ length: 12 }, (_, index) => api<CalendarPayload>(`/calendar?account_id=${account.id}&year=${month.getFullYear()}&month=${index + 1}&date_mode=${dateMode}`))
+      : [api<CalendarPayload>(`/calendar?account_id=${account.id}&year=${month.getFullYear()}&month=${month.getMonth() + 1}&date_mode=${dateMode}`)];
     Promise.all(requests)
       .then((payloads) => {
         setYearData(view === "year" ? payloads : []);
         setData(payloads[0] ?? null);
       })
       .catch((reason: Error) => setError(reason.message));
-  }, [account, month, view]);
+  }, [account, month, view, dateMode]);
 
   const cells = useMemo(() => {
     const start = new Date(month.getFullYear(), month.getMonth(), 1).getDay();
@@ -92,9 +105,13 @@ export default function CalendarPage() {
       <PageHeader
         eyebrow="Trading day archive"
         title="Calendar"
-        description="See the month at a glance, then open any day to revisit what happened."
+        description={dateMode === "trading" ? "Broker/session trading days: evening and Asia activity rolls into the following regular session." : "Local calendar days: trades stay on the date they were entered."}
         action={
           <div className="calendar-actions">
+            <div className="day-mode-toggle" role="group" aria-label="Calendar grouping">
+              <button type="button" className={dateMode === "trading" ? "active" : ""} onClick={() => changeDateMode("trading")}>Trading day</button>
+              <button type="button" className={dateMode === "calendar" ? "active" : ""} onClick={() => changeDateMode("calendar")}>Calendar day</button>
+            </div>
             <div className="segmented">{(["month", "week", "year"] as const).map((item) => <button className={view === item ? "selected" : ""} key={item} onClick={() => setView(item)}>{item}</button>)}</div>
             <div className="month-controls">
             <button className="button" onClick={() => setMonth(new Date(month.getFullYear(), month.getMonth() - 1, 1))} aria-label="Previous month">‹</button>
@@ -137,7 +154,7 @@ export default function CalendarPage() {
           {view === "year" ? <section className="year-grid">
             {yearData.map((item) => <button className="card year-month" key={item.month} onClick={() => { setMonth(new Date(item.year, item.month - 1, 1)); setView("month"); }}><span>{new Date(item.year, item.month - 1, 1).toLocaleDateString([], { month: "long" })}</span><Pnl value={item.summary.net_pnl}>{money(item.summary.net_pnl)}</Pnl><small>{item.summary.trading_days} trading day{item.summary.trading_days === 1 ? "" : "s"} · {item.summary.journaled_days} journaled</small></button>)}
           </section> : view === "week" ? <section className="week-calendar">
-            {weekRows.map(({ date, dateKey, record }) => <Link className="card week-day-row" href={`/timeline/${dateKey}`} key={dateKey}><div><strong>{date.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}</strong><span>{record ? `${record.trade_count} trade${record.trade_count === 1 ? "" : "s"}` : "No trades"}</span></div><span className={`status-text ${record?.journaled ? "complete" : record ? "partial" : ""}`}>{record ? (record.journaled ? "Journaled" : "Needs recap") : "Quiet"}</span>{record ? <Pnl value={record.net_pnl}>{money(record.net_pnl)}</Pnl> : <span className="muted">Quiet</span>}</Link>)}
+            {weekRows.map(({ date, dateKey, record }) => <Link className="card week-day-row" href={`/timeline/${dateKey}${dateMode === "calendar" ? "?mode=calendar" : ""}`} key={dateKey}><div><strong>{date.toLocaleDateString([], { weekday: "long", month: "long", day: "numeric" })}</strong><span>{record ? `${record.trade_count} trade${record.trade_count === 1 ? "" : "s"}` : "No trades"}</span></div><span className={`status-text ${record?.journaled ? "complete" : record ? "partial" : ""}`}>{record ? (record.journaled ? "Journaled" : "Needs recap") : "Quiet"}</span>{record ? <Pnl value={record.net_pnl}>{money(record.net_pnl)}</Pnl> : <span className="muted">Quiet</span>}</Link>)}
           </section> : <section className="calendar-grid card">
             {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label) => <span className="weekday" key={label}>{label}</span>)}
             {cells.map((day, index) => {
@@ -148,7 +165,7 @@ export default function CalendarPage() {
                 const pnl = Number(record.net_pnl);
                 const intensity = Math.min(1, Math.abs(pnl) / maxAbsPnl);
                 return (
-                  <Link className={`calendar-cell active-day ${pnl > 0 ? "gain-day" : pnl < 0 ? "loss-day" : "flat-day"} ${intensity >= 0.67 ? "heat-high" : intensity >= 0.34 ? "heat-medium" : "heat-low"}`} href={`/timeline/${dateKey}`} key={dateKey}>
+                  <Link className={`calendar-cell active-day ${pnl > 0 ? "gain-day" : pnl < 0 ? "loss-day" : "flat-day"} ${intensity >= 0.67 ? "heat-high" : intensity >= 0.34 ? "heat-medium" : "heat-low"}`} href={`/timeline/${dateKey}${dateMode === "calendar" ? "?mode=calendar" : ""}`} key={dateKey}>
                     <span className="calendar-day-number">{day}</span>
                     <div className="calendar-result">
                       <Pnl value={record.net_pnl}>{money(record.net_pnl)}</Pnl>
@@ -161,7 +178,7 @@ export default function CalendarPage() {
                   </Link>
                 );
               })() : (
-                <Link className="calendar-cell" href={`/timeline/${dateKey}`} key={dateKey}>
+                <Link className="calendar-cell" href={`/timeline/${dateKey}${dateMode === "calendar" ? "?mode=calendar" : ""}`} key={dateKey}>
                   <span>{day}</span>
                 </Link>
               );

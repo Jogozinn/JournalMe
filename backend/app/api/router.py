@@ -39,6 +39,8 @@ from app.models import (
     Tag,
     Trade,
     TradeJournal,
+    TradeSequence,
+    TradeSequenceTrade,
     TradingAccount,
     User,
 )
@@ -62,6 +64,7 @@ from app.schemas import (
     TagCreate,
     TagUpdate,
     TradeJournalUpdate,
+    TradeSequenceSave,
 )
 from app.seed import seed_default_tags
 from app.services.broker_bridge_auth import authenticate_bridge_token, issue_bridge_token, revoke_bridge_token
@@ -102,6 +105,12 @@ from app.services.push_notifications import (
     push_configured,
     send_push_to_user,
 )
+from app.services.trading_calendar import (
+    current_day_for_account,
+    fill_trade_date_map,
+    group_trades_by_day,
+    trade_day_for_trade,
+)
 from app.storage import StorageProvider, get_storage_provider
 
 router = APIRouter()
@@ -123,6 +132,118 @@ BridgeConnectionAuth = Annotated[BrokerConnection, Depends(_bridge_connection_au
 
 def _storage() -> StorageProvider:
     return get_storage_provider(get_settings())
+
+
+def _trade_review_navigation(
+    db: Session,
+    user: User,
+    trade: Trade,
+    *,
+    date_mode: str = "trading",
+) -> dict[str, Any]:
+    account = _account_or_404(db, user, trade.account_id)
+    trades = list(
+        db.scalars(
+            select(Trade)
+            .where(Trade.account_id == account.id)
+            .order_by(Trade.entry_timestamp.asc(), Trade.id.asc())
+        ).all()
+    )
+    fill_dates = fill_trade_date_map(db, [item.id for item in trades]) if date_mode == "trading" else {}
+    selected_day = trade_day_for_trade(
+        trade, account, mode=date_mode, fill_dates=fill_dates
+    )
+    day_trades = [
+        item
+        for item in trades
+        if trade_day_for_trade(item, account, mode=date_mode, fill_dates=fill_dates)
+        == selected_day
+    ]
+    try:
+        index = next(position for position, item in enumerate(day_trades) if item.id == trade.id)
+    except StopIteration:
+        index = 0
+    return {
+        "previous_trade_id": str(day_trades[index - 1].id) if index > 0 else None,
+        "next_trade_id": (
+            str(day_trades[index + 1].id) if index + 1 < len(day_trades) else None
+        ),
+        "review_position": {
+            "index": index + 1,
+            "count": len(day_trades),
+            "date": selected_day.isoformat(),
+            "date_mode": date_mode,
+        },
+    }
+
+
+def _trade_detail_payload(
+    db: Session,
+    user: User,
+    trade: Trade,
+    *,
+    date_mode: str = "trading",
+) -> dict[str, Any]:
+    payload = _trade_dict(trade, detail=True)
+    payload.update(_trade_review_navigation(db, user, trade, date_mode=date_mode))
+    return payload
+
+
+def _trade_sequence_payload(
+    db: Session,
+    user: User,
+    sequence: TradeSequence,
+) -> dict[str, Any]:
+    account = _account_or_404(db, user, sequence.account_id)
+    links = list(
+        db.scalars(
+            select(TradeSequenceTrade)
+            .options(
+                selectinload(TradeSequenceTrade.trade).selectinload(Trade.tags),
+                selectinload(TradeSequenceTrade.trade).selectinload(Trade.journal),
+            )
+            .where(TradeSequenceTrade.sequence_id == sequence.id)
+            .order_by(TradeSequenceTrade.sort_order.asc(), TradeSequenceTrade.created_at.asc())
+        ).all()
+    )
+    trades = [link.trade for link in links]
+    statuses = trade_review_statuses(db, user.id, trades) if trades else {}
+    net = sum((trade.net_pnl for trade in trades), Decimal("0"))
+    gross = sum((trade.gross_pnl for trade in trades), Decimal("0"))
+    fees_known = all(trade.fees is not None for trade in trades)
+    fees = sum((trade.fees or Decimal("0") for trade in trades), Decimal("0"))
+    fill_dates = fill_trade_date_map(db, [trade.id for trade in trades]) if trades else {}
+    trading_dates = sorted(
+        {trade_day_for_trade(trade, account, fill_dates=fill_dates) for trade in trades}
+    )
+    return {
+        "id": str(sequence.id),
+        "account_id": str(sequence.account_id),
+        "title": sequence.title,
+        "thesis": sequence.thesis,
+        "shared_context": sequence.shared_context,
+        "lesson_learned": sequence.lesson_learned,
+        "created_at": sequence.created_at.isoformat(),
+        "updated_at": sequence.updated_at.isoformat(),
+        "summary": {
+            "trade_count": len(trades),
+            "net_pnl": _decimal(net),
+            "gross_pnl": _decimal(gross),
+            "fees": _decimal(fees) if fees_known else None,
+            "started_at": _timestamp(min((trade.entry_timestamp for trade in trades), default=None)),
+            "ended_at": _timestamp(max((trade.exit_timestamp for trade in trades), default=None)),
+            "trading_dates": [item.isoformat() for item in trading_dates],
+        },
+        "members": [
+            {
+                "trade": _trade_dict(link.trade),
+                "note": link.note,
+                "sort_order": link.sort_order,
+                "review": statuses.get(link.trade_id),
+            }
+            for link in links
+        ],
+    }
 
 
 def _account_or_404(db: Session, user: User, account_id: UUID) -> TradingAccount:
@@ -679,35 +800,23 @@ def list_trades(
 
 
 @router.get("/trades/{trade_id}")
-def trade_detail(trade_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
+def trade_detail(
+    trade_id: UUID,
+    db: Db,
+    user: CurrentUser,
+    date_mode: str = Query(default="trading", pattern="^(trading|calendar)$"),
+) -> dict[str, Any]:
     trade = _trade_or_404(db, user, trade_id)
-    previous_id = db.scalar(
-        select(Trade.id)
-        .where(
-            Trade.account_id == trade.account_id,
-            Trade.entry_timestamp < trade.entry_timestamp,
-        )
-        .order_by(Trade.entry_timestamp.desc())
-        .limit(1)
-    )
-    next_id = db.scalar(
-        select(Trade.id)
-        .where(
-            Trade.account_id == trade.account_id,
-            Trade.entry_timestamp > trade.entry_timestamp,
-        )
-        .order_by(Trade.entry_timestamp.asc())
-        .limit(1)
-    )
-    payload = _trade_dict(trade, detail=True)
-    payload["previous_trade_id"] = str(previous_id) if previous_id else None
-    payload["next_trade_id"] = str(next_id) if next_id else None
-    return payload
+    return _trade_detail_payload(db, user, trade, date_mode=date_mode)
 
 
 @router.put("/trades/{trade_id}/journal")
 def update_trade_journal(
-    trade_id: UUID, payload: TradeJournalUpdate, db: Db, user: CurrentUser
+    trade_id: UUID,
+    payload: TradeJournalUpdate,
+    db: Db,
+    user: CurrentUser,
+    date_mode: str = Query(default="trading", pattern="^(trading|calendar)$"),
 ) -> dict[str, Any]:
     trade = _trade_or_404(db, user, trade_id)
     journal_data = payload.model_dump(
@@ -729,7 +838,173 @@ def update_trade_journal(
     elif payload.mark_reviewed is False:
         journal.reviewed_at = None
     db.commit()
-    return _trade_dict(_trade_or_404(db, user, trade_id), detail=True)
+    return _trade_detail_payload(
+        db, user, _trade_or_404(db, user, trade_id), date_mode=date_mode
+    )
+
+
+@router.get("/trades/{trade_id}/sequence")
+def get_trade_sequence(
+    trade_id: UUID, db: Db, user: CurrentUser
+) -> dict[str, Any] | None:
+    trade = _trade_or_404(db, user, trade_id)
+    link = db.scalar(
+        select(TradeSequenceTrade).where(TradeSequenceTrade.trade_id == trade.id)
+    )
+    if link is None:
+        return None
+    sequence = db.get(TradeSequence, link.sequence_id)
+    if sequence is None:
+        return None
+    return _trade_sequence_payload(db, user, sequence)
+
+
+@router.get("/trades/{trade_id}/sequence-candidates")
+def trade_sequence_candidates(
+    trade_id: UUID,
+    db: Db,
+    user: CurrentUser,
+    date_mode: str = Query(default="trading", pattern="^(trading|calendar)$"),
+) -> dict[str, Any]:
+    trade = _trade_or_404(db, user, trade_id)
+    account = _account_or_404(db, user, trade.account_id)
+    trades = list(
+        db.scalars(
+            select(Trade)
+            .options(selectinload(Trade.tags), selectinload(Trade.journal))
+            .where(Trade.account_id == account.id)
+            .order_by(Trade.entry_timestamp.asc(), Trade.id.asc())
+        ).all()
+    )
+    fill_dates = fill_trade_date_map(db, [item.id for item in trades]) if date_mode == "trading" else {}
+    selected_day = trade_day_for_trade(
+        trade, account, mode=date_mode, fill_dates=fill_dates
+    )
+    candidates = [
+        item
+        for item in trades
+        if trade_day_for_trade(item, account, mode=date_mode, fill_dates=fill_dates)
+        == selected_day
+    ]
+    links = db.execute(
+        select(TradeSequenceTrade.trade_id, TradeSequenceTrade.sequence_id).where(
+            TradeSequenceTrade.trade_id.in_([item.id for item in candidates])
+        )
+    ).all() if candidates else []
+    sequence_by_trade = {trade_id: sequence_id for trade_id, sequence_id in links}
+    return {
+        "date": selected_day.isoformat(),
+        "date_mode": date_mode,
+        "items": [
+            {
+                **_trade_dict(item),
+                "sequence_id": (
+                    str(sequence_by_trade[item.id]) if item.id in sequence_by_trade else None
+                ),
+            }
+            for item in candidates
+        ],
+    }
+
+
+def _save_trade_sequence(
+    db: Session,
+    user: User,
+    payload: TradeSequenceSave,
+    *,
+    sequence: TradeSequence | None = None,
+) -> TradeSequence:
+    account = _account_or_404(db, user, payload.account_id)
+    member_ids = list(dict.fromkeys(member.trade_id for member in payload.members))
+    if not member_ids:
+        raise HTTPException(status_code=422, detail="A trade sequence needs at least one trade.")
+    trades = list(
+        db.scalars(
+            select(Trade).where(
+                Trade.account_id == account.id,
+                Trade.id.in_(member_ids),
+            )
+        ).all()
+    )
+    if len(trades) != len(member_ids):
+        raise HTTPException(status_code=404, detail="One or more sequence trades were not found in this account.")
+
+    existing_links = list(
+        db.scalars(
+            select(TradeSequenceTrade).where(TradeSequenceTrade.trade_id.in_(member_ids))
+        ).all()
+    )
+    for link in existing_links:
+        if sequence is None or link.sequence_id != sequence.id:
+            raise HTTPException(
+                status_code=409,
+                detail="One or more selected trades already belong to another trade sequence.",
+            )
+
+    if sequence is None:
+        sequence = TradeSequence(account_id=account.id)
+        db.add(sequence)
+        db.flush()
+    elif sequence.account_id != account.id:
+        raise HTTPException(status_code=409, detail="Trade sequence account cannot be changed.")
+
+    sequence.title = payload.title
+    sequence.thesis = payload.thesis
+    sequence.shared_context = payload.shared_context
+    sequence.lesson_learned = payload.lesson_learned
+
+    note_by_trade = {member.trade_id: member.note for member in payload.members}
+    ordered = sorted(trades, key=lambda item: (item.entry_timestamp, str(item.id)))
+    db.query(TradeSequenceTrade).filter(
+        TradeSequenceTrade.sequence_id == sequence.id
+    ).delete(synchronize_session=False)
+    db.flush()
+    for position, item in enumerate(ordered):
+        db.add(
+            TradeSequenceTrade(
+                sequence_id=sequence.id,
+                trade_id=item.id,
+                sort_order=position,
+                note=note_by_trade.get(item.id),
+            )
+        )
+    db.flush()
+    return sequence
+
+
+@router.post("/trade-sequences", status_code=status.HTTP_201_CREATED)
+def create_trade_sequence(
+    payload: TradeSequenceSave, db: Db, user: CurrentUser
+) -> dict[str, Any]:
+    sequence = _save_trade_sequence(db, user, payload)
+    db.commit()
+    return _trade_sequence_payload(db, user, sequence)
+
+
+@router.put("/trade-sequences/{sequence_id}")
+def update_trade_sequence(
+    sequence_id: UUID, payload: TradeSequenceSave, db: Db, user: CurrentUser
+) -> dict[str, Any]:
+    sequence = db.get(TradeSequence, sequence_id)
+    if sequence is None:
+        raise HTTPException(status_code=404, detail="Trade sequence not found.")
+    _account_or_404(db, user, sequence.account_id)
+    sequence = _save_trade_sequence(db, user, payload, sequence=sequence)
+    db.commit()
+    return _trade_sequence_payload(db, user, sequence)
+
+
+@router.delete("/trade-sequences/{sequence_id}", status_code=204)
+def delete_trade_sequence(
+    sequence_id: UUID, db: Db, user: CurrentUser
+) -> Response:
+    sequence = db.get(TradeSequence, sequence_id)
+    if sequence is None:
+        raise HTTPException(status_code=404, detail="Trade sequence not found.")
+    _account_or_404(db, user, sequence.account_id)
+    db.delete(sequence)
+    db.commit()
+    return Response(status_code=204)
 
 
 @router.get("/trades/{trade_id}/executions")
@@ -814,26 +1089,24 @@ def upsert_daily_journal(
 
 @router.get("/timeline/{trading_date}")
 def session_timeline(
-    trading_date: date, account_id: UUID, db: Db, user: CurrentUser
+    trading_date: date,
+    account_id: UUID,
+    db: Db,
+    user: CurrentUser,
+    date_mode: str = Query(default="trading", pattern="^(trading|calendar)$"),
 ) -> dict[str, Any]:
     account = _account_or_404(db, user, account_id)
-    account_zone = ZoneInfo(account.timezone)
-    day_start = datetime.combine(trading_date, time.min, tzinfo=account_zone).astimezone(
-        timezone.utc
+    all_trades = list(
+        db.scalars(
+            select(Trade)
+            .options(selectinload(Trade.tags), selectinload(Trade.journal))
+            .where(Trade.account_id == account_id)
+            .order_by(Trade.entry_timestamp.asc(), Trade.id.asc())
+        ).all()
     )
-    day_end = datetime.combine(trading_date, time.max, tzinfo=account_zone).astimezone(
-        timezone.utc
+    trades = group_trades_by_day(db, account, all_trades, mode=date_mode).get(
+        trading_date, []
     )
-    trades = db.scalars(
-        select(Trade)
-        .options(selectinload(Trade.tags), selectinload(Trade.journal))
-        .where(
-            Trade.account_id == account_id,
-            Trade.entry_timestamp >= day_start,
-            Trade.entry_timestamp <= day_end,
-        )
-        .order_by(Trade.entry_timestamp)
-    ).all()
     journal = db.scalar(
         select(DailyJournal).where(
             DailyJournal.account_id == account_id,
@@ -858,12 +1131,28 @@ def session_timeline(
     total_fees = (
         sum((trade.fees or Decimal("0")) for trade in trades) if trades else Decimal("0")
     )
+    account_zone = ZoneInfo(account.timezone)
+    if date_mode == "calendar":
+        day_start_local = datetime.combine(trading_date, time.min, tzinfo=account_zone)
+        day_end_local = datetime.combine(trading_date, time.max, tzinfo=account_zone)
+    else:
+        # CME equity-index futures trade date: the evening session beginning
+        # at 18:00 local account time belongs to the following trading day.
+        day_start_local = datetime.combine(
+            trading_date - timedelta(days=1), time(hour=18), tzinfo=account_zone
+        )
+        day_end_local = datetime.combine(
+            trading_date, time(hour=17, minute=59, second=59, microsecond=999999), tzinfo=account_zone
+        )
+    day_start = day_start_local.astimezone(timezone.utc)
+    day_end = day_end_local.astimezone(timezone.utc)
     activity = trading_activity_summary(
         db, account, start_at=day_start, end_at=day_end, trades=list(trades)
     )
     return {
         "account": _account_dict(account),
         "trading_date": trading_date.isoformat(),
+        "date_mode": date_mode,
         "journal": _daily_journal_dict(journal) if journal else None,
         "trades": events,
         "review": day_review_status(
@@ -871,7 +1160,9 @@ def session_timeline(
             [review_statuses[trade.id] for trade in trades],
             review_rules(db, user.id),
         ),
-        "navigation": _trading_day_navigation(db, account, trading_date),
+        "navigation": _trading_day_navigation(
+            db, account, trading_date, date_mode=date_mode
+        ),
         "activity": activity,
         "summary": {
             "gross_pnl": _decimal(sum((trade.gross_pnl for trade in trades), Decimal("0"))),
@@ -919,7 +1210,8 @@ def dashboard(
         select(DailyJournal).where(DailyJournal.account_id == account_id)
     ).all())
     account_zone = ZoneInfo(account.timezone)
-    today = datetime.now(timezone.utc).astimezone(account_zone).date()
+    today = current_day_for_account(account, mode="trading")
+    fill_dates = fill_trade_date_map(db, [trade.id for trade in all_trades])
     if period == "today":
         range_start = range_end = today
     elif period == "week":
@@ -938,7 +1230,9 @@ def dashboard(
             trade
             for trade in all_trades
             if range_start
-            <= _as_utc(trade.entry_timestamp).astimezone(account_zone).date()
+            <= trade_day_for_trade(
+                trade, account, mode="trading", fill_dates=fill_dates
+            )
             <= range_end
         ]
         journals = [
@@ -960,7 +1254,7 @@ def dashboard(
         running += trade.net_pnl
         curve.append({"at": _timestamp(trade.exit_timestamp), "value": _decimal(running)})
     trading_days = {
-        _as_utc(trade.entry_timestamp).astimezone(account_zone).date()
+        trade_day_for_trade(trade, account, mode="trading", fill_dates=fill_dates)
         for trade in trades
     }
     return {
@@ -1002,24 +1296,33 @@ def calendar_summary(
     db: Db,
     user: CurrentUser,
     month: int = Query(ge=1, le=12),
+    date_mode: str = Query(default="trading", pattern="^(trading|calendar)$"),
 ) -> dict[str, Any]:
     account = _account_or_404(db, user, account_id)
     _, last_day = month_calendar.monthrange(year, month)
     start, end = date(year, month, 1), date(year, month, last_day)
+
+    # Pull a small boundary cushion because evening-session trades can belong
+    # to the following broker trading date. Filtering is done after canonical
+    # day assignment so month edges remain correct.
     account_zone = ZoneInfo(account.timezone)
-    start_at = datetime.combine(start, time.min, tzinfo=account_zone).astimezone(
-        timezone.utc
+    start_at = datetime.combine(start - timedelta(days=1), time.min, tzinfo=account_zone).astimezone(timezone.utc)
+    end_at = datetime.combine(end + timedelta(days=1), time.max, tzinfo=account_zone).astimezone(timezone.utc)
+    candidate_trades = list(
+        db.scalars(
+            select(Trade)
+            .where(
+                Trade.account_id == account_id,
+                Trade.entry_timestamp >= start_at,
+                Trade.entry_timestamp <= end_at,
+            )
+            .order_by(Trade.entry_timestamp.asc(), Trade.id.asc())
+        ).all()
     )
-    end_at = datetime.combine(end, time.max, tzinfo=account_zone).astimezone(
-        timezone.utc
-    )
-    trades = db.scalars(
-        select(Trade).where(
-            Trade.account_id == account_id,
-            Trade.entry_timestamp >= start_at,
-            Trade.entry_timestamp <= end_at,
-        )
-    ).all()
+    grouped_all = group_trades_by_day(db, account, candidate_trades, mode=date_mode)
+    grouped = {day: values for day, values in grouped_all.items() if start <= day <= end}
+    trades = [trade for day in sorted(grouped) for trade in grouped[day]]
+
     journals = {
         item.trading_date
         for item in db.scalars(
@@ -1029,11 +1332,6 @@ def calendar_summary(
             )
         ).all()
     }
-    grouped: dict[date, list[Trade]] = defaultdict(list)
-    for trade in trades:
-        grouped[_as_utc(trade.entry_timestamp).astimezone(account_zone).date()].append(
-            trade
-        )
     days = [
         {
             "date": day.isoformat(),
@@ -1050,6 +1348,7 @@ def calendar_summary(
     return {
         "year": year,
         "month": month,
+        "date_mode": date_mode,
         "days": days,
         "summary": {
             **_metrics(trades),
@@ -1077,6 +1376,7 @@ def analytics(account_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
         .order_by(DailyBalance.trade_date)
     ).all()
     account_zone = ZoneInfo(account.timezone)
+    fill_dates = fill_trade_date_map(db, [trade.id for trade in trades])
     starting_cash = db.scalar(
         select(func.sum(CashTransaction.delta)).where(
             CashTransaction.account_id == account_id,
@@ -1091,8 +1391,9 @@ def analytics(account_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
             (
                 trade.net_pnl
                 for trade in trades
-                if _as_utc(trade.exit_timestamp).astimezone(account_zone).date()
-                <= balance.trade_date
+                if trade_day_for_trade(
+                    trade, account, mode="trading", fill_dates=fill_dates
+                ) <= balance.trade_date
             ),
             Decimal("0"),
         )
@@ -1119,9 +1420,9 @@ def analytics(account_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
         "by_symbol": _group_performance(trades, lambda trade: trade.root_symbol or trade.symbol),
         "by_weekday": _group_performance(
             trades,
-            lambda trade: _as_utc(trade.entry_timestamp)
-            .astimezone(account_zone)
-            .strftime("%A"),
+            lambda trade: trade_day_for_trade(
+                trade, account, mode="trading", fill_dates=fill_dates
+            ).strftime("%A"),
         ),
         "by_hour": _group_performance(
             trades,
@@ -2263,21 +2564,26 @@ def _daily_journal_dict(journal: DailyJournal) -> dict[str, Any]:
 
 
 def _trading_day_navigation(
-    db: Session, account: TradingAccount, current: date
+    db: Session,
+    account: TradingAccount,
+    current: date,
+    *,
+    date_mode: str = "trading",
 ) -> dict[str, str | None]:
-    zone = ZoneInfo(account.timezone)
-    timestamps = db.scalars(
-        select(Trade.entry_timestamp).where(Trade.account_id == account.id)
-    ).all()
-    journal_dates = db.scalars(
-        select(DailyJournal.trading_date).where(DailyJournal.account_id == account.id)
-    ).all()
-    dates = sorted(
-        {
-            _as_utc(timestamp).astimezone(zone).date() for timestamp in timestamps
-        }
-        | set(journal_dates)
+    trades = list(
+        db.scalars(
+            select(Trade)
+            .where(Trade.account_id == account.id)
+            .order_by(Trade.entry_timestamp.asc())
+        ).all()
     )
+    grouped = group_trades_by_day(db, account, trades, mode=date_mode)
+    journal_dates = set(
+        db.scalars(
+            select(DailyJournal.trading_date).where(DailyJournal.account_id == account.id)
+        ).all()
+    )
+    dates = sorted(set(grouped) | journal_dates)
     previous = max((value for value in dates if value < current), default=None)
     following = min((value for value in dates if value > current), default=None)
     return {

@@ -20,16 +20,27 @@ export default function TradingDaysPage() {
   const { account, loading } = useAccount();
   const [days, setDays] = useState<TradingDay[]>([]);
   const [error, setError] = useState("");
+  const [dateMode, setDateMode] = useState<"trading" | "calendar">("trading");
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("journalme-date-mode");
+    if (saved === "calendar" || saved === "trading") setDateMode(saved);
+  }, []);
+
+  function changeDateMode(next: "trading" | "calendar") {
+    setDateMode(next);
+    window.localStorage.setItem("journalme-date-mode", next);
+  }
 
   useEffect(() => {
     if (!account) return;
-    api<{ items: TradingDay[] }>(`/trading-days?account_id=${account.id}`)
+    api<{ items: TradingDay[] }>(`/trading-days?account_id=${account.id}&date_mode=${dateMode}`)
       .then((payload) => {
         setDays(payload.items);
         setError("");
       })
       .catch((reason: Error) => setError(reason.message));
-  }, [account]);
+  }, [account, dateMode]);
 
   const maxAbsPnl = useMemo(
     () => Math.max(1, ...days.map((day) => Math.abs(Number(day.net_pnl)))),
@@ -46,19 +57,27 @@ export default function TradingDaysPage() {
       <PageHeader
         eyebrow={`${account.name} · ${account.timezone}`}
         title="Trading Days"
-        description="Every session in one place, with the result and the reflection beside it."
-        action={<Link className="button primary" href={`/timeline/${new Date().toISOString().slice(0, 10)}`}>Plan today</Link>}
+        description={dateMode === "trading" ? "Broker trade-date sessions: evening/Asia activity rolls into the next trading day." : "Calendar-date view: trades stay on the local date they were entered."}
+        action={
+          <div className="day-mode-actions">
+            <div className="day-mode-toggle" role="group" aria-label="Day grouping">
+              <button type="button" className={dateMode === "trading" ? "active" : ""} onClick={() => changeDateMode("trading")}>Trading day</button>
+              <button type="button" className={dateMode === "calendar" ? "active" : ""} onClick={() => changeDateMode("calendar")}>Calendar day</button>
+            </div>
+            <Link className="button primary" href={`/timeline/${new Date().toISOString().slice(0, 10)}${dateMode === "calendar" ? "?mode=calendar" : ""}`}>Plan today</Link>
+          </div>
+        }
       />
       {error && <ErrorState message={error} />}
       {!days.length && !error ? (
-        <EmptyState title="No trading days yet." copy="Plan today without creating a fake trade, or import your execution history." href={`/timeline/${new Date().toISOString().slice(0, 10)}`} action="Plan today" />
+        <EmptyState title="No trading days yet." copy="Plan today without creating a fake trade, or import your execution history." href={`/timeline/${new Date().toISOString().slice(0, 10)}${dateMode === "calendar" ? "?mode=calendar" : ""}`} action="Plan today" />
       ) : (
         <section className="day-list session-ledger">
           {days.map((day) => {
             const pnl = Number(day.net_pnl);
             const intensity = Math.max(8, Math.round((Math.abs(pnl) / maxAbsPnl) * 100));
             return (
-              <Link className="card day-list-item session-row" href={`/timeline/${day.date}`} key={day.date}>
+              <Link className="card day-list-item session-row" href={`/timeline/${day.date}${dateMode === "calendar" ? "?mode=calendar" : ""}`} key={day.date}>
                 <div className="session-date">
                   <small>{new Date(`${day.date}T12:00:00`).toLocaleDateString([], { weekday: "long" })}</small>
                   <strong>{new Date(`${day.date}T12:00:00`).toLocaleDateString([], { month: "long", day: "numeric", year: "numeric" })}</strong>

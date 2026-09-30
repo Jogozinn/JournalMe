@@ -180,12 +180,15 @@ def test_waverr_research_pack_includes_unjournaled_account_trade(tmp_path, monke
     assert response.status_code == 200, response.text
     with zipfile.ZipFile(io.BytesIO(response.content)) as bundle:
         manifest = json.loads(bundle.read("manifest.json"))
-        assert manifest["schema_version"] == 2
+        assert manifest["schema_version"] == 3
         assert manifest["dataset_counts"]["trades"] == 1
         trades = json.loads(bundle.read("dataset/trades.json"))
         assert len(trades) == 1
         assert trades[0]["id"] == str(trade_id)
         assert Decimal(trades[0]["net_pnl"]) == Decimal("38")
+        assert trades[0]["calendar_date"] == "2026-09-30"
+        assert trades[0]["trading_date"] == "2026-09-30"
+        assert trades[0]["trading_date_source"] == "session_rollover_fallback"
         dictionary = bundle.read("dataset/DATA_DICTIONARY.txt").decode()
         assert "including trades with no Companion episode" in manifest["research_contract"]["account_dataset"]
         assert "every current trade" in dictionary

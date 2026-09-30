@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { Icon } from "@/components/icons";
 import { AuthenticatedImage } from "@/components/authenticated-assets";
@@ -18,6 +18,12 @@ type TradeDetail = Trade & {
   journal: Record<string, string | number | boolean | null> | null;
   previous_trade_id: string | null;
   next_trade_id: string | null;
+  review_position: {
+    index: number;
+    count: number;
+    date: string;
+    date_mode: "trading" | "calendar";
+  };
 };
 
 type Executions = {
@@ -69,8 +75,46 @@ type PlaybookContext = {
   review: ReviewStatus;
 };
 
+type TradeSequenceMember = {
+  trade: Trade;
+  note: string | null;
+  sort_order: number;
+  review: ReviewStatus | null;
+};
+
+type TradeSequence = {
+  id: string;
+  account_id: string;
+  title: string | null;
+  thesis: string | null;
+  shared_context: string | null;
+  lesson_learned: string | null;
+  summary: {
+    trade_count: number;
+    net_pnl: string;
+    gross_pnl: string;
+    fees: string | null;
+    started_at: string | null;
+    ended_at: string | null;
+    trading_dates: string[];
+  };
+  members: TradeSequenceMember[];
+};
+
+type SequenceCandidate = Trade & { sequence_id: string | null };
+
+type SequenceCandidates = {
+  date: string;
+  date_mode: "trading" | "calendar";
+  items: SequenceCandidate[];
+};
+
 export default function TradeReviewPage() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const dateMode = searchParams.get("date_mode") === "calendar" ? "calendar" : "trading";
+  const navSuffix = dateMode === "calendar" ? "?date_mode=calendar" : "";
   const [trade, setTrade] = useState<TradeDetail | null>(null);
   const [executions, setExecutions] = useState<Executions | null>(null);
   const [screenshots, setScreenshots] = useState<Screenshot[]>([]);
@@ -87,18 +131,31 @@ export default function TradeReviewPage() {
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
   const [viewer, setViewer] = useState<{ path: string; alt: string; captureId?: string } | null>(null);
+  const [sequence, setSequence] = useState<TradeSequence | null>(null);
+  const [sequenceCandidates, setSequenceCandidates] = useState<SequenceCandidates | null>(null);
+  const [sequencePickerOpen, setSequencePickerOpen] = useState(false);
+  const [sequenceSelected, setSequenceSelected] = useState<string[]>([]);
+  const [sequenceNotes, setSequenceNotes] = useState<Record<string, string>>( {} );
+  const [sequenceTitle, setSequenceTitle] = useState("");
+  const [sequenceThesis, setSequenceThesis] = useState("");
+  const [sequenceContext, setSequenceContext] = useState("");
+  const [sequenceLesson, setSequenceLesson] = useState("");
+  const [sequenceSaving, setSequenceSaving] = useState(false);
+  const [sequenceDirty, setSequenceDirty] = useState(false);
 
   useEffect(() => {
     Promise.all([
-      api<TradeDetail>(`/trades/${params.id}`),
+      api<TradeDetail>(`/trades/${params.id}?date_mode=${dateMode}`),
       api<Executions>(`/trades/${params.id}/executions`),
       api<Tag[]>("/tags"),
       api<Screenshot[]>(`/trades/${params.id}/attachments`),
       api<Playbook[]>("/playbooks?active=true"),
       api<PlaybookContext>(`/trades/${params.id}/playbooks`),
       api<CompanionCapture[]>("/captures?limit=100"),
+      api<TradeSequence | null>(`/trades/${params.id}/sequence`),
+      api<SequenceCandidates>(`/trades/${params.id}/sequence-candidates?date_mode=${dateMode}`),
     ])
-      .then(([nextTrade, nextExecutions, nextTags, nextScreenshots, nextPlaybooks, nextContext, nextCaptures]) => {
+      .then(([nextTrade, nextExecutions, nextTags, nextScreenshots, nextPlaybooks, nextContext, nextCaptures, nextSequence, nextCandidates]) => {
         setTrade(nextTrade);
         setExecutions(nextExecutions);
         setTags(nextTags);
@@ -115,9 +172,20 @@ export default function TradeReviewPage() {
         setContext(nextContext);
         setPrimaryPlaybook(nextContext.assignments.find((item) => item.is_primary)?.id ?? "");
         setChecklistResponses(Object.fromEntries(nextContext.responses.map((row) => [row.checklist_item_id, row.passed])));
+        setSequence(nextSequence);
+        setSequenceCandidates(nextCandidates);
+        const selectedIds = nextSequence?.members.map((member) => member.trade.id) ?? [params.id];
+        setSequenceSelected(selectedIds);
+        setSequenceNotes(Object.fromEntries((nextSequence?.members ?? []).map((member) => [member.trade.id, member.note ?? ""])));
+        setSequenceTitle(nextSequence?.title ?? "");
+        setSequenceThesis(nextSequence?.thesis ?? "");
+        setSequenceContext(nextSequence?.shared_context ?? "");
+        setSequenceLesson(nextSequence?.lesson_learned ?? "");
+        setSequenceDirty(false);
+        setSequencePickerOpen(false);
       })
       .catch((reason: Error) => setError(reason.message));
-  }, [params.id]);
+  }, [params.id, dateMode]);
 
   useEffect(() => {
     const saveShortcut = (event: KeyboardEvent) => {
@@ -146,11 +214,11 @@ export default function TradeReviewPage() {
 
   useEffect(() => {
     const warn = (event: BeforeUnloadEvent) => {
-      if (dirty) event.preventDefault();
+      if (dirty || sequenceDirty) event.preventDefault();
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
+  }, [dirty, sequenceDirty]);
 
   const groupedTags = useMemo(
     () =>
@@ -162,14 +230,47 @@ export default function TradeReviewPage() {
     [tags],
   );
 
+  async function persistSequence(): Promise<TradeSequence | null> {
+    if (!trade || sequenceSelected.length < 2) return sequence;
+    const body = {
+      account_id: trade.account_id,
+      title: sequenceTitle.trim() || null,
+      thesis: sequenceThesis.trim() || null,
+      shared_context: sequenceContext.trim() || null,
+      lesson_learned: sequenceLesson.trim() || null,
+      members: sequenceSelected.map((tradeId) => ({
+        trade_id: tradeId,
+        note: sequenceNotes[tradeId]?.trim() || null,
+      })),
+    };
+    const nextSequence = await api<TradeSequence>(
+      sequence ? `/trade-sequences/${sequence.id}` : "/trade-sequences",
+      { method: sequence ? "PUT" : "POST", body: JSON.stringify(body) },
+    );
+    setSequence(nextSequence);
+    setSequenceSelected(nextSequence.members.map((member) => member.trade.id));
+    setSequenceNotes(Object.fromEntries(nextSequence.members.map((member) => [member.trade.id, member.note ?? ""])));
+    setSequenceDirty(false);
+    setSequencePickerOpen(false);
+    setSequenceCandidates(
+      await api<SequenceCandidates>(`/trades/${params.id}/sequence-candidates?date_mode=${dateMode}`),
+    );
+    return nextSequence;
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+    const advance = submitter?.dataset.advance === "true";
     const form = new FormData(event.currentTarget);
     setSaving(true);
     setError("");
     const text = (name: string) => String(form.get(name) || "") || null;
     try {
-      const updated = await api<TradeDetail>(`/trades/${params.id}/journal`, {
+      if (sequenceDirty && sequenceSelected.length > 1) {
+        await persistSequence();
+      }
+      const updated = await api<TradeDetail>(`/trades/${params.id}/journal?date_mode=${dateMode}`, {
         method: "PUT",
         body: JSON.stringify({
           thesis: text("thesis"),
@@ -219,10 +320,72 @@ export default function TradeReviewPage() {
       setDirty(false);
       setSaved(true);
       window.setTimeout(() => setSaved(false), 2200);
+      if (advance && updated.next_trade_id) {
+        router.push(`/trades/${updated.next_trade_id}${navSuffix}`);
+      }
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Trade journal could not be saved.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  const selectedSequenceTrades = useMemo(() => {
+    const byId = new Map((sequenceCandidates?.items ?? []).map((item) => [item.id, item]));
+    return sequenceSelected
+      .map((id) => byId.get(id))
+      .filter((item): item is SequenceCandidate => Boolean(item))
+      .sort((a, b) => a.entry_timestamp.localeCompare(b.entry_timestamp));
+  }, [sequenceCandidates, sequenceSelected]);
+
+  function toggleSequenceTrade(candidate: SequenceCandidate) {
+    if (candidate.id === params.id) return;
+    if (candidate.sequence_id && candidate.sequence_id !== sequence?.id) return;
+    setSequenceDirty(true);
+    setSequenceSelected((current) =>
+      current.includes(candidate.id)
+        ? current.filter((id) => id !== candidate.id)
+        : [...current, candidate.id],
+    );
+  }
+
+  async function saveSequence() {
+    if (!trade || sequenceSelected.length < 2) return;
+    setSequenceSaving(true);
+    setError("");
+    try {
+      await persistSequence();
+      setSaved(true);
+      window.setTimeout(() => setSaved(false), 2200);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Trade sequence could not be saved.");
+    } finally {
+      setSequenceSaving(false);
+    }
+  }
+
+  async function removeSequence() {
+    if (!sequence) return;
+    setSequenceSaving(true);
+    setError("");
+    try {
+      await api(`/trade-sequences/${sequence.id}`, { method: "DELETE" });
+      setSequence(null);
+      setSequenceSelected([params.id]);
+      setSequenceNotes({});
+      setSequenceTitle("");
+      setSequenceThesis("");
+      setSequenceContext("");
+      setSequenceLesson("");
+      setSequenceDirty(false);
+      setSequencePickerOpen(false);
+      setSequenceCandidates(
+        await api<SequenceCandidates>(`/trades/${params.id}/sequence-candidates?date_mode=${dateMode}`),
+      );
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Trade sequence could not be removed.");
+    } finally {
+      setSequenceSaving(false);
     }
   }
 
@@ -280,19 +443,20 @@ export default function TradeReviewPage() {
       <PageHeader
         eyebrow="Focused trade review"
         title={`${trade.symbol} · ${trade.side}`}
-        description={dateTime(trade.entry_timestamp, { dateStyle: "full", timeStyle: "short" })}
+        description={`${dateTime(trade.entry_timestamp, { dateStyle: "full", timeStyle: "short" })} · ${trade.review_position.date_mode === "trading" ? "Trading day" : "Calendar day"} ${trade.review_position.date} · Trade ${trade.review_position.index} of ${trade.review_position.count}`}
         action={
-          <div className="review-nav">
+          <div className="review-nav review-flow-nav">
             {trade.previous_trade_id ? (
-              <Link className="button" href={`/trades/${trade.previous_trade_id}`}>
+              <Link className="button" href={`/trades/${trade.previous_trade_id}${navSuffix}`}>
                 ‹ Previous
               </Link>
             ) : <span />}
-            {trade.next_trade_id && (
-              <Link className="button" href={`/trades/${trade.next_trade_id}`}>
+            <span className="review-progress">{trade.review_position.index} / {trade.review_position.count}</span>
+            {trade.next_trade_id ? (
+              <Link className="button" href={`/trades/${trade.next_trade_id}${navSuffix}`}>
                 Next ›
               </Link>
-            )}
+            ) : <span />}
           </div>
         }
       />
@@ -435,7 +599,109 @@ export default function TradeReviewPage() {
               </div>
             </section>
           )}
+          <section className="card trade-sequence-card">
+            <div className="section-title trade-sequence-heading">
+              <div>
+                <p className="eyebrow">Trade sequence · optional</p>
+                <h2>{sequence?.title || (sequence ? "One idea, several executions" : "Tie related trades together")}</h2>
+                <p className="review-guidance">Keep every broker trade separate. Put the shared goal here once, then add only what changed on each execution.</p>
+              </div>
+              {sequence && <Pnl value={sequence.summary.net_pnl}>{money(sequence.summary.net_pnl)}</Pnl>}
+            </div>
+
+            <div className="trade-sequence-strip" aria-label="Trades in this sequence">
+              {selectedSequenceTrades.map((item, index) => (
+                <Fragment key={item.id}>
+                  {index > 0 && <span className="trade-sequence-plus" aria-hidden="true">＋</span>}
+                  <article className={`trade-sequence-tile ${item.id === params.id ? "current" : ""}`}>
+                    <div className="trade-sequence-tile-head">
+                      <Link href={`/trades/${item.id}${navSuffix}`}>
+                        <strong>{timeOnly(item.entry_timestamp)} · {item.side}</strong>
+                        <span>{item.symbol}</span>
+                      </Link>
+                      <Pnl value={item.net_pnl}>{money(item.net_pnl)}</Pnl>
+                    </div>
+                    <input
+                      aria-label={`Small note for ${item.symbol} at ${timeOnly(item.entry_timestamp)}`}
+                      value={sequenceNotes[item.id] ?? ""}
+                      onChange={(event) => { setSequenceNotes((current) => ({ ...current, [item.id]: event.target.value })); setSequenceDirty(true); }}
+                      placeholder={item.id === params.id ? "What changed on this execution?" : "Tiny update · optional"}
+                    />
+                    {item.id !== params.id && (
+                      <button className="sequence-remove" type="button" onClick={() => toggleSequenceTrade(item)}>Remove</button>
+                    )}
+                  </article>
+                </Fragment>
+              ))}
+              <button className="trade-sequence-add" type="button" onClick={() => setSequencePickerOpen((open) => !open)}>
+                <span>＋</span>
+                <strong>Add related trade</strong>
+                <small>Same {dateMode === "trading" ? "trading" : "calendar"} day</small>
+              </button>
+            </div>
+
+            {sequencePickerOpen && sequenceCandidates && (
+              <div className="trade-sequence-picker">
+                <div className="trade-sequence-picker-head">
+                  <div><strong>Trades from {sequenceCandidates.date}</strong><small>Select executions that belonged to the same overall idea.</small></div>
+                  <button className="button quiet compact" type="button" onClick={() => setSequencePickerOpen(false)}>Done</button>
+                </div>
+                <div className="trade-sequence-candidates">
+                  {sequenceCandidates.items.map((candidate) => {
+                    const selected = sequenceSelected.includes(candidate.id);
+                    const belongsElsewhere = Boolean(candidate.sequence_id && candidate.sequence_id !== sequence?.id);
+                    return (
+                      <button
+                        type="button"
+                        key={candidate.id}
+                        className={selected ? "selected" : ""}
+                        disabled={candidate.id === params.id || belongsElsewhere}
+                        onClick={() => toggleSequenceTrade(candidate)}
+                      >
+                        <span>{selected ? "✓" : "+"}</span>
+                        <strong>{timeOnly(candidate.entry_timestamp)} · {candidate.side}</strong>
+                        <small>{candidate.symbol} · {money(candidate.net_pnl)}</small>
+                        {belongsElsewhere && <em>Already in another sequence</em>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {(sequence || sequenceSelected.length > 1) && (
+              <div className="trade-sequence-shared">
+                <div className="form-grid">
+                  <div className="field span-2">
+                    <label htmlFor="sequence-title">Sequence title <span className="muted">optional</span></label>
+                    <input id="sequence-title" value={sequenceTitle} onChange={(event) => { setSequenceTitle(event.target.value); setSequenceDirty(true); }} placeholder="NY bearish continuation" />
+                  </div>
+                  <div className="field span-2">
+                    <label htmlFor="sequence-goal">Overall goal / context</label>
+                    <textarea id="sequence-goal" value={sequenceContext} onChange={(event) => { setSequenceContext(event.target.value); setSequenceDirty(true); }} placeholder="What were you trying to accomplish across all of these trades?" />
+                  </div>
+                  <div className="field span-2">
+                    <label htmlFor="sequence-thesis">Overall read / thesis</label>
+                    <textarea id="sequence-thesis" value={sequenceThesis} onChange={(event) => { setSequenceThesis(event.target.value); setSequenceDirty(true); }} placeholder="The shared market idea only needs to be written once." />
+                  </div>
+                  <div className="field span-2">
+                    <label htmlFor="sequence-lesson">Sequence lesson <span className="muted">optional</span></label>
+                    <textarea id="sequence-lesson" value={sequenceLesson} onChange={(event) => { setSequenceLesson(event.target.value); setSequenceDirty(true); }} placeholder="What did the whole run of executions teach you?" />
+                  </div>
+                </div>
+                <div className="trade-sequence-actions">
+                  <button className="button primary" type="button" disabled={sequenceSaving || sequenceSelected.length < 2} onClick={() => void saveSequence()}>
+                    {sequenceSaving ? "Saving..." : sequence ? "Save sequence" : `Tie ${sequenceSelected.length} trades`}
+                  </button>
+                  {sequence && <button className="button quiet" type="button" disabled={sequenceSaving} onClick={() => void removeSequence()}>Untie sequence</button>}
+                  <small>{sequenceSelected.length} separate broker trade{sequenceSelected.length === 1 ? "" : "s"} · accounting stays unchanged · Save review also saves sequence edits</small>
+                </div>
+              </div>
+            )}
+          </section>
+
           <form
+            key={trade.id}
             id="trade-review-form"
             className="card review-form"
             onSubmit={submit}
@@ -446,15 +712,15 @@ export default function TradeReviewPage() {
           >
             <div className="section-title">
               <div><p className="eyebrow">Your perspective</p><h2>Quick recap</h2></div>
-              <span className={dirty ? "unsaved" : saved ? "positive" : "muted"}>
-                {dirty ? "Unsaved changes" : saved ? "Saved" : "Up to date"}
+              <span className={dirty || sequenceDirty ? "unsaved" : saved ? "positive" : "muted"}>
+                {dirty || sequenceDirty ? "Unsaved changes" : saved ? "Saved" : "Up to date"}
               </span>
             </div>
-            <p className="review-guidance">Add only the part JournalMe could not observe from fills, charts, or Companion. Open Advanced review when the extra detail is useful.</p>
+            <p className="review-guidance">{sequence ? "The shared trade idea is saved above. Use this recap only for what was unique about this execution." : "Add only the part JournalMe could not observe from fills, charts, or Companion. Open Advanced review when the extra detail is useful."}</p>
             <div className="form-grid quick-trade-review">
               <div className="field span-2">
-                <label htmlFor="thesis">Your read</label>
-                <textarea id="thesis" name="thesis" defaultValue={String(journal.thesis ?? "")} placeholder="What was the idea or decision that mattered?" />
+                <label htmlFor="thesis">{sequence ? "This execution only" : "Your read"}</label>
+                <textarea id="thesis" name="thesis" defaultValue={String(journal.thesis ?? "")} placeholder={sequence ? "What changed on this specific entry, exit, or re-entry? Optional if the sequence note already covers it." : "What was the idea or decision that mattered?"} />
               </div>
               <div className="field">
                 <label htmlFor="went-well">What would you repeat?</label>
@@ -569,11 +835,22 @@ export default function TradeReviewPage() {
                 </div>
               </div>
             </details>
-            <div className="form-actions">
-              <button className="button primary" disabled={saving}>
-                {saving ? "Saving..." : "Save review"}
-              </button>
-              <small className="shortcut-hint">Ctrl/⌘ + S</small>
+            <div className="form-actions review-flow-dock">
+              <div className="review-flow-dock-nav">
+                {trade.previous_trade_id ? <Link className="button quiet" href={`/trades/${trade.previous_trade_id}${navSuffix}`}>‹ Previous</Link> : <span />}
+                <span className="review-progress">Trade {trade.review_position.index} of {trade.review_position.count}</span>
+              </div>
+              <div className="review-flow-dock-actions">
+                <button className="button" disabled={saving}>
+                  {saving ? "Saving..." : "Save review"}
+                </button>
+                {trade.next_trade_id && (
+                  <button className="button primary" data-advance="true" disabled={saving}>
+                    {saving ? "Saving..." : "Save & next ›"}
+                  </button>
+                )}
+                {!trade.next_trade_id && <span className="completion-note complete">Last trade in this {dateMode === "trading" ? "trading" : "calendar"} day.</span>}
+              </div>
             </div>
           </form>
         </div>
@@ -591,7 +868,7 @@ export default function TradeReviewPage() {
               <div><dt>Source</dt><dd>{trade.source_quality.replaceAll("_", " ")}</dd></div>
               <div><dt>Review</dt><dd className={`status-text ${context?.review.status ?? "unreviewed"}`}>{context?.review.status ?? "unreviewed"}</dd></div>
             </dl>
-            <Link className="button full" href={`/timeline/${trade.entry_timestamp.slice(0, 10)}`}>Open trading day</Link>
+            <Link className="button full" href={`/timeline/${trade.review_position.date}${dateMode === "calendar" ? "?mode=calendar" : ""}`}>Open {dateMode === "trading" ? "trading" : "calendar"} day</Link>
           </article>
           <article className="card fills-card">
             <p className="eyebrow">Linked fills</p>

@@ -15,6 +15,8 @@ from app.models import (
     Trade,
     TradeChecklistResponse,
     TradePlaybook,
+    TradeSequence,
+    TradeSequenceTrade,
     UserPreference,
 )
 
@@ -116,14 +118,46 @@ def trade_review_statuses(
         if trade_id is not None
     )
 
+    # A Trade Sequence is intentionally a human review layer above canonical
+    # broker trades. Shared thesis/context can satisfy the repeated part of a
+    # review, while the member note can carry the small execution-specific
+    # update. Accounting rows remain untouched.
+    sequence_context_by_trade: dict[UUID, dict[str, str | None]] = {}
+    sequence_rows = db.execute(
+        select(
+            TradeSequenceTrade.trade_id,
+            TradeSequenceTrade.note,
+            TradeSequence.thesis,
+            TradeSequence.shared_context,
+            TradeSequence.lesson_learned,
+        )
+        .join(TradeSequence, TradeSequence.id == TradeSequenceTrade.sequence_id)
+        .where(TradeSequenceTrade.trade_id.in_(trade_ids))
+    ).all()
+    for trade_id, member_note, thesis, shared_context, lesson_learned in sequence_rows:
+        sequence_context_by_trade[trade_id] = {
+            "member_note": member_note,
+            "thesis": thesis,
+            "shared_context": shared_context,
+            "lesson_learned": lesson_learned,
+        }
+
     statuses: dict[UUID, dict[str, Any]] = {}
     for trade in trades:
         missing: list[str] = []
         journal = trade.journal
+        sequence_context = sequence_context_by_trade.get(trade.id, {})
         for field_name in rules["trade_fields"]:
             if field_name not in DEFAULT_TRADE_FIELDS:
                 continue
             value = getattr(journal, field_name, None) if journal else None
+            if value is None or (isinstance(value, str) and not value.strip()):
+                if field_name == "thesis":
+                    value = sequence_context.get("thesis") or sequence_context.get("shared_context")
+                elif field_name == "entry_reason":
+                    value = sequence_context.get("member_note")
+                elif field_name == "lesson_learned":
+                    value = sequence_context.get("lesson_learned")
             if value is None or (isinstance(value, str) and not value.strip()):
                 missing.append(DEFAULT_TRADE_FIELDS[field_name])
         if rules["require_primary_playbook"] and trade.id not in primary_by_trade:

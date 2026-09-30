@@ -48,6 +48,8 @@ from app.models import (
     TradeChecklistResponse,
     TradeJournal,
     TradePlaybook,
+    TradeSequence,
+    TradeSequenceTrade,
     TradingAccount,
     TradingEpisode,
     User,
@@ -80,6 +82,13 @@ from app.services.prop_rules import (
     latest_profile_version,
 )
 from app.services.review import day_review_status, review_rules, trade_review_statuses
+from app.services.trading_calendar import (
+    calendar_date_for_timestamp,
+    fallback_trading_date_for_timestamp,
+    fill_trade_date_map,
+    group_trades_by_day,
+    trade_day_for_trade,
+)
 from app.storage import get_storage_provider
 
 router = APIRouter()
@@ -595,7 +604,12 @@ def review_queue(
 
 
 @router.get("/review-summary")
-def review_summary(account_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
+def review_summary(
+    account_id: UUID,
+    db: Db,
+    user: CurrentUser,
+    date_mode: str = Query(default="trading", pattern="^(trading|calendar)$"),
+) -> dict[str, Any]:
     account = _account(db, user, account_id)
     trades = list(
         db.scalars(
@@ -610,10 +624,7 @@ def review_summary(account_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any
         key: sum(payload["status"] == key for payload in statuses.values())
         for key in ("unreviewed", "partial", "complete")
     }
-    zone = ZoneInfo(account.timezone)
-    by_day: dict[date, list[Trade]] = defaultdict(list)
-    for item in trades:
-        by_day[_as_utc(item.entry_timestamp).astimezone(zone).date()].append(item)
+    by_day = group_trades_by_day(db, account, trades, mode=date_mode)
     journals = {
         item.trading_date: item
         for item in db.scalars(
@@ -663,6 +674,7 @@ def trading_days(
     user: CurrentUser,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=31, ge=1, le=366),
+    date_mode: str = Query(default="trading", pattern="^(trading|calendar)$"),
 ) -> dict[str, Any]:
     account = _account(db, user, account_id)
     trades = list(
@@ -674,10 +686,7 @@ def trading_days(
         ).all()
     )
     statuses = trade_review_statuses(db, user.id, trades)
-    zone = ZoneInfo(account.timezone)
-    grouped: dict[date, list[Trade]] = defaultdict(list)
-    for item in trades:
-        grouped[_as_utc(item.entry_timestamp).astimezone(zone).date()].append(item)
+    grouped = group_trades_by_day(db, account, trades, mode=date_mode)
     journals = {
         item.trading_date: item
         for item in db.scalars(
@@ -704,7 +713,12 @@ def trading_days(
             }
         )
     offset = (page - 1) * page_size
-    return {"items": rows[offset : offset + page_size], "total": len(rows), "page": page}
+    return {
+        "items": rows[offset : offset + page_size],
+        "total": len(rows),
+        "page": page,
+        "date_mode": date_mode,
+    }
 
 
 def _period_review_payload(
@@ -2039,6 +2053,25 @@ def export_waverr_research_pack(
         ).all()
     )
     all_trade_ids = [item.id for item in all_trades]
+    trade_sequences = list(
+        db.scalars(
+            select(TradeSequence)
+            .where(TradeSequence.account_id == account.id)
+            .order_by(TradeSequence.created_at.asc(), TradeSequence.id.asc())
+        ).all()
+    )
+    sequence_ids = [item.id for item in trade_sequences]
+    sequence_links = list(
+        db.scalars(
+            select(TradeSequenceTrade)
+            .where(TradeSequenceTrade.sequence_id.in_(sequence_ids))
+            .order_by(
+                TradeSequenceTrade.sequence_id.asc(),
+                TradeSequenceTrade.sort_order.asc(),
+            )
+        ).all()
+    ) if sequence_ids else []
+    sequence_by_trade = {item.trade_id: item.sequence_id for item in sequence_links}
     all_fills = list(
         db.scalars(
             select(Fill)
@@ -2222,16 +2255,34 @@ def export_waverr_research_pack(
                     {"id": str(tag.id), "name": tag.name, "category": tag.category.value}
                     for tag in trade.tags
                 ]
+                trade_payload["trade_sequence_id"] = (
+                    str(sequence_by_trade[trade.id]) if trade.id in sequence_by_trade else None
+                )
+                broker_trade_date = fills[0].trade_date if fills else None
+                trade_payload["calendar_date"] = calendar_date_for_timestamp(
+                    trade.entry_timestamp, account.timezone
+                ).isoformat()
+                trade_payload["trading_date"] = (
+                    broker_trade_date
+                    or fallback_trading_date_for_timestamp(trade.entry_timestamp, account.timezone)
+                ).isoformat()
+                trade_payload["trading_date_source"] = (
+                    "broker_fill_trade_date" if broker_trade_date is not None else "session_rollover_fallback"
+                )
                 journal = db.get(TradeJournal, trade.id)
                 if journal is not None:
                     review_payload = _model_dict(journal)
                     review_payload["knowledge_stage"] = "post_outcome_review"
 
-            local_date = _as_utc(episode.started_at).astimezone(ZoneInfo(account.timezone)).date()
+            episode_trading_date = (
+                fills[0].trade_date
+                if fills
+                else fallback_trading_date_for_timestamp(episode.started_at, account.timezone)
+            )
             daily_journal = db.scalar(
                 select(DailyJournal).where(
                     DailyJournal.account_id == account.id,
-                    DailyJournal.trading_date == local_date,
+                    DailyJournal.trading_date == episode_trading_date,
                 )
             )
             daily_payload = _model_dict(daily_journal) if daily_journal is not None else None
@@ -2323,6 +2374,11 @@ def export_waverr_research_pack(
         # Flat account-wide dataset for model/research ingestion. Episode folders
         # remain the richer chronological representation; these files make bulk
         # loading deterministic and ensure unjournaled trades are not omitted.
+        linked_trade_dates: dict[UUID, date] = {}
+        for fill in all_fills:
+            if fill.trade_id is not None and fill.trade_id not in linked_trade_dates:
+                linked_trade_dates[fill.trade_id] = fill.trade_date
+
         trade_payloads: list[dict[str, Any]] = []
         for item in all_trades:
             payload = _model_dict(item)
@@ -2330,6 +2386,20 @@ def export_waverr_research_pack(
                 {"id": str(tag.id), "name": tag.name, "category": tag.category.value}
                 for tag in item.tags
             ]
+            payload["trade_sequence_id"] = (
+                str(sequence_by_trade[item.id]) if item.id in sequence_by_trade else None
+            )
+            broker_trade_date = linked_trade_dates.get(item.id)
+            payload["calendar_date"] = calendar_date_for_timestamp(
+                item.entry_timestamp, account.timezone
+            ).isoformat()
+            payload["trading_date"] = (
+                broker_trade_date
+                or fallback_trading_date_for_timestamp(item.entry_timestamp, account.timezone)
+            ).isoformat()
+            payload["trading_date_source"] = (
+                "broker_fill_trade_date" if broker_trade_date is not None else "session_rollover_fallback"
+            )
             trade_payloads.append(payload)
 
         dataset_tables: dict[str, list[Any]] = {
@@ -2350,6 +2420,8 @@ def export_waverr_research_pack(
             "rule_violations": [_model_dict(item) for item in rule_violations],
             "tags_catalog": [_model_dict(item) for item in tags_catalog],
             "playbooks": [_model_dict(item) for item in playbooks],
+            "trade_sequences": [_model_dict(item) for item in trade_sequences],
+            "trade_sequence_trades": [_model_dict(item) for item in sequence_links],
             "companion_moments": flat_moment_index,
         }
         for name, values in dataset_tables.items():
@@ -2382,11 +2454,12 @@ def export_waverr_research_pack(
         bundle.writestr(
             "dataset/DATA_DICTIONARY.txt",
             "JournalMe account-wide research dataset\n\n"
-            "trades.json = every current trade row for the selected account; run JournalMe reconciliation after catch-up imports before training.\n"
+            "trades.json = every current trade row for the selected account; includes calendar_date, trading_date, trading_date_source, and trade_sequence_id. Run JournalMe reconciliation after catch-up imports before training.\n"
             "fills.json = all persisted broker fills from imported reports.\n"
             "orders.json = all persisted orders, including canceled/rejected activity. Orders are not trades.\n"
             "broker_execution_events.json = read-only live NinjaTrader execution events with source IDs/provenance.\n"
             "companion_moments.json = flat index of all Companion moments/captures; knowledge_stage distinguishes live vs retrospective evidence.\n"
+            "trade_sequences.json + trade_sequence_trades.json = human-level trade ideas/campaigns that group separate canonical trades without merging their accounting. Shared sequence context and per-trade notes are research evidence.\n"
             "Episode folders remain the authoritative chronological human-context representation.\n"
             "Never use outcome/post-trade data as if it existed at decision time.\n",
         )
@@ -2394,7 +2467,7 @@ def export_waverr_research_pack(
         manifest = {
             "product": "JournalMe",
             "export_type": "waverr_research_pack",
-            "schema_version": 2,
+            "schema_version": 3,
             "generated_at": utcnow().isoformat(),
             "account": {
                 "id": str(account.id),
@@ -2421,6 +2494,8 @@ def export_waverr_research_pack(
                 "legacy_captures": len(legacy_captures),
                 "trade_journals": len(trade_journals),
                 "daily_journals": len(daily_journals),
+                "trade_sequences": len(trade_sequences),
+                "trade_sequence_memberships": len(sequence_links),
                 "attachments": len(account_attachments),
             },
             "episodes": episode_index,
@@ -2432,7 +2507,7 @@ def export_waverr_research_pack(
             "README.txt",
             "JournalMe -> WaveRR Research Pack\n\n"
             "Each episode preserves chronological human observations, optional screenshots, and any matched canonical trade evidence.\n"
-            "The dataset/ folder additionally contains every current trade, fill, order, live broker execution, journal/review row, and account attachment for the selected account, even when no Companion episode exists.\n"
+            "The dataset/ folder additionally contains every current trade, fill, order, live broker execution, journal/review row, trade sequence, and account attachment for the selected account, even when no Companion episode exists.\n"
             "Pre-timeline Companion captures are included under legacy_captures so existing research data is not lost.\n"
             "Use recorded_live/knowledge_stage to prevent hindsight leakage. A WAIT/no-trade episode is valid research data.\n"
             "This package is for research only and should flow through WaveRR hypothesis/testing/governance before any production change.\n",

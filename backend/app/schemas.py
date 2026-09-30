@@ -95,6 +95,20 @@ class TradeJournalUpdate(BaseModel):
     tag_ids: list[UUID] | None = None
 
 
+class TradeSequenceMemberInput(BaseModel):
+    trade_id: UUID
+    note: str | None = Field(default=None, max_length=4000)
+
+
+class TradeSequenceSave(BaseModel):
+    account_id: UUID
+    title: str | None = Field(default=None, max_length=240)
+    thesis: str | None = Field(default=None, max_length=10000)
+    shared_context: str | None = Field(default=None, max_length=10000)
+    lesson_learned: str | None = Field(default=None, max_length=10000)
+    members: list[TradeSequenceMemberInput] = Field(min_length=1, max_length=100)
+
+
 class TagCreate(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     category: TagCategory

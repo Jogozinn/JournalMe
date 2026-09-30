@@ -2,33 +2,20 @@
 
 import Link from "next/link";
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useSearchParams } from "next/navigation";
 
 import { useAccount } from "@/components/account-provider";
 import { EmptyState, ErrorState, PageHeader, Pnl, Skeleton } from "@/components/ui";
-import { api, duration, money, percent, quantity, timeOnly } from "@/lib/api";
+import { api, duration, money, percent, quantity } from "@/lib/api";
 import type { Playbook, ReviewStatus, Trade } from "@/lib/types";
 
 type Timeline = {
   trading_date: string;
+  date_mode: "trading" | "calendar";
   journal: Record<string, unknown> | null;
   trades: (Trade & { running_net_pnl: string; review: ReviewStatus })[];
   review: ReviewStatus;
   navigation: { previous: string | null; next: string | null };
-  activity: {
-    completed_trades: number;
-    orders_submitted: number;
-    orders_filled: number;
-    orders_canceled: number;
-    orders_rejected: number;
-    orders_other: number;
-    fill_count: number;
-    contracts_executed: string;
-    fees_paid: string | null;
-    gross_pnl: string;
-    net_pnl: string;
-    fees_complete: boolean;
-  };
   summary: {
     gross_pnl: string;
     fees: string | null;
@@ -55,6 +42,10 @@ const QUICK_BEHAVIORS = ["Chased", "FOMO", "Revenge traded", "Oversized", "Moved
 
 export default function TimelinePage() {
   const { date } = useParams<{ date: string }>();
+  const searchParams = useSearchParams();
+  const dateMode = searchParams.get("mode") === "calendar" ? "calendar" : "trading";
+  const modeSuffix = dateMode === "calendar" ? "?mode=calendar" : "";
+  const tradeSuffix = dateMode === "calendar" ? "?date_mode=calendar" : "";
   const { account, loading } = useAccount();
   const [data, setData] = useState<Timeline | null>(null);
   const [error, setError] = useState("");
@@ -73,7 +64,7 @@ export default function TimelinePage() {
   const load = () => {
     if (!account) return;
     Promise.all([
-      api<Timeline>(`/timeline/${date}?account_id=${account.id}`),
+      api<Timeline>(`/timeline/${date}?account_id=${account.id}&date_mode=${dateMode}`),
       api<Playbook[]>("/playbooks?active=true"),
     ])
       .then(([timeline, nextPlaybooks]) => {
@@ -93,7 +84,7 @@ export default function TimelinePage() {
       .catch((reason: Error) => setError(reason.message));
   };
 
-  useEffect(load, [account, date]);
+  useEffect(load, [account, date, dateMode]);
 
   function toggleQuickTag(value: string, current: string[], setter: (next: string[]) => void) {
     setter(current.includes(value) ? current.filter((item) => item !== value) : [...current, value]);
@@ -169,10 +160,22 @@ export default function TimelinePage() {
   return (
     <>
       <PageHeader
-        eyebrow="Session story"
+        eyebrow={dateMode === "trading" ? "Trading-day story" : "Calendar-day story"}
         title={prettyDate}
-        description={`${data.summary.trade_count} trades · ${percent(data.summary.win_rate)} win rate`}
-        action={<div className="review-nav">{data.navigation.previous ? <Link className="button" href={`/timeline/${data.navigation.previous}`}>‹ Previous day</Link> : <span />}<Link className="button" href="/calendar">Calendar</Link>{data.navigation.next && <Link className="button" href={`/timeline/${data.navigation.next}`}>Next day ›</Link>}</div>}
+        description={`${data.summary.trade_count} trades · ${percent(data.summary.win_rate)} win rate · ${dateMode === "trading" ? "broker/session grouping" : "local calendar grouping"}`}
+        action={
+          <div className="timeline-header-actions">
+            <div className="day-mode-toggle" role="group" aria-label="Day grouping">
+              <Link className={dateMode === "trading" ? "active" : ""} href={`/timeline/${date}`}>Trading day</Link>
+              <Link className={dateMode === "calendar" ? "active" : ""} href={`/timeline/${date}?mode=calendar`}>Calendar day</Link>
+            </div>
+            <div className="review-nav">
+              {data.navigation.previous ? <Link className="button" href={`/timeline/${data.navigation.previous}${modeSuffix}`}>‹ Previous day</Link> : <span />}
+              <Link className="button" href="/calendar">Calendar</Link>
+              {data.navigation.next ? <Link className="button" href={`/timeline/${data.navigation.next}${modeSuffix}`}>Next day ›</Link> : <span />}
+            </div>
+          </div>
+        }
       />
       {error && <ErrorState message={error} />}
 
@@ -185,27 +188,6 @@ export default function TimelinePage() {
         <div><span>Best trade</span><Pnl value={data.summary.best_trade?.net_pnl ?? null}>{data.summary.best_trade ? money(data.summary.best_trade.net_pnl) : "Unavailable"}</Pnl></div>
         <div><span>Worst trade</span><Pnl value={data.summary.worst_trade?.net_pnl ?? null}>{data.summary.worst_trade ? money(data.summary.worst_trade.net_pnl) : "Unavailable"}</Pnl></div>
         <div><span>Journal</span><strong className={`status-text ${data.review.status}`}>{data.review.status}</strong></div>
-      </section>
-
-      <section className="card" style={{ marginBottom: "1rem" }}>
-        <div className="section-title">
-          <div>
-            <p className="eyebrow">Execution ledger</p>
-            <h2>What actually happened</h2>
-          </div>
-          <span>{data.activity.completed_trades} completed trades</span>
-        </div>
-        <div className="session-summary" style={{ marginTop: "0.75rem" }}>
-          <div><span>Orders submitted</span><strong>{data.activity.orders_submitted}</strong></div>
-          <div><span>Filled orders</span><strong>{data.activity.orders_filled}</strong></div>
-          <div><span>Canceled</span><strong>{data.activity.orders_canceled}</strong></div>
-          <div><span>Rejected</span><strong>{data.activity.orders_rejected}</strong></div>
-          <div><span>Actual fills</span><strong>{data.activity.fill_count}</strong></div>
-          <div><span>Contracts executed</span><strong>{quantity(data.activity.contracts_executed)}</strong></div>
-          <div><span>Fees paid</span><strong>{money(data.activity.fees_paid)}</strong></div>
-          <div><span>Net result</span><Pnl value={data.activity.net_pnl}>{money(data.activity.net_pnl)}</Pnl></div>
-        </div>
-        <p className="muted" style={{ marginTop: "0.75rem" }}>Canceled and rejected orders are activity, not trades. Partial fills and partial exits stay inside the same flat-to-flat trade.</p>
       </section>
 
       <section className="timeline-layout premium-timeline-layout">
@@ -225,7 +207,7 @@ export default function TimelinePage() {
                       key={trade.id}
                       type="button"
                       className={index < replayIndex ? "revealed" : index === replayIndex && replay ? "current" : ""}
-                      aria-label={`Open ${trade.symbol} at ${timeOnly(trade.entry_timestamp)}`}
+                      aria-label={`Open ${trade.symbol} at ${new Date(trade.entry_timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`}
                       onClick={() => {
                         setReplay(true);
                         setReplayIndex(index);
@@ -258,11 +240,11 @@ export default function TimelinePage() {
             {Boolean(journal.pre_session_mindset) && <blockquote>{String(journal.pre_session_mindset)}</blockquote>}
           </article>
           {visibleTrades.map((trade) => (
-            <Link href={`/trades/${trade.id}`} className={`timeline-event trade-event card ${replay && trade.id === replayTrade?.id ? "replay-current" : ""}`} key={trade.id}>
+            <Link href={`/trades/${trade.id}${tradeSuffix}`} className={`timeline-event trade-event card ${replay && trade.id === replayTrade?.id ? "replay-current" : ""}`} key={trade.id}>
               <span className="timeline-dot" />
               <div className="event-time">
-                <strong>{timeOnly(trade.entry_timestamp)}</strong>
-                <span>to {timeOnly(trade.exit_timestamp)}</span>
+                <strong>{new Date(trade.entry_timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</strong>
+                <span>to {new Date(trade.exit_timestamp).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</span>
               </div>
               <div className="event-main">
                 <div><strong>{trade.symbol}</strong><span className={`side-token ${trade.side}`}>{trade.side}</span></div>
