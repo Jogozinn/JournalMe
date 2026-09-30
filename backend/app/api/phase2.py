@@ -27,7 +27,9 @@ from app.models import (
     AccountGroupMember,
     Attachment,
     AuditEvent,
+    BrokerExecutionEvent,
     CaptureEvent,
+    CashTransaction,
     DailyBalance,
     DailyJournal,
     Fill,
@@ -2023,6 +2025,135 @@ def export_waverr_research_pack(
         ).all()
     )
 
+    # Account-wide research spine. Episode folders preserve time-aligned human
+    # context, while this dataset guarantees that WaveRR also receives every
+    # current trade/execution row for the selected account -- including trades
+    # that were never journaled in Companion. Export is intentionally read-only;
+    # callers should reconcile the canonical ledger after catch-up imports first.
+    all_trades = list(
+        db.scalars(
+            select(Trade)
+            .options(selectinload(Trade.tags))
+            .where(Trade.account_id == account.id)
+            .order_by(Trade.entry_timestamp.asc(), Trade.id.asc())
+        ).all()
+    )
+    all_trade_ids = [item.id for item in all_trades]
+    all_fills = list(
+        db.scalars(
+            select(Fill)
+            .where(Fill.account_id == account.id)
+            .order_by(Fill.timestamp.asc(), Fill.id.asc())
+        ).all()
+    )
+    all_orders = list(
+        db.scalars(
+            select(Order)
+            .where(Order.account_id == account.id)
+            .order_by(Order.submitted_timestamp.asc(), Order.id.asc())
+        ).all()
+    )
+    live_executions = list(
+        db.scalars(
+            select(BrokerExecutionEvent)
+            .where(
+                BrokerExecutionEvent.user_id == user.id,
+                BrokerExecutionEvent.account_id == account.id,
+            )
+            .order_by(BrokerExecutionEvent.executed_at.asc(), BrokerExecutionEvent.id.asc())
+        ).all()
+    )
+    daily_balances = list(
+        db.scalars(
+            select(DailyBalance)
+            .where(DailyBalance.account_id == account.id)
+            .order_by(DailyBalance.trade_date.asc(), DailyBalance.id.asc())
+        ).all()
+    )
+    cash_transactions = list(
+        db.scalars(
+            select(CashTransaction)
+            .where(CashTransaction.account_id == account.id)
+            .order_by(CashTransaction.timestamp.asc(), CashTransaction.id.asc())
+        ).all()
+    )
+    trade_journals = list(
+        db.scalars(
+            select(TradeJournal)
+            .where(TradeJournal.trade_id.in_(all_trade_ids))
+            .order_by(TradeJournal.created_at.asc())
+        ).all()
+    ) if all_trade_ids else []
+    daily_journals = list(
+        db.scalars(
+            select(DailyJournal)
+            .where(DailyJournal.account_id == account.id)
+            .order_by(DailyJournal.trading_date.asc())
+        ).all()
+    )
+    daily_journal_ids = [item.id for item in daily_journals]
+    weekly_reviews = list(
+        db.scalars(
+            select(WeeklyReview)
+            .where(WeeklyReview.account_id == account.id)
+            .order_by(WeeklyReview.week_start.asc())
+        ).all()
+    )
+    monthly_reviews = list(
+        db.scalars(
+            select(MonthlyReview)
+            .where(MonthlyReview.account_id == account.id)
+            .order_by(MonthlyReview.month_start.asc())
+        ).all()
+    )
+    goals = list(
+        db.scalars(
+            select(Goal)
+            .where(Goal.account_id == account.id)
+            .order_by(Goal.start_date.asc())
+        ).all()
+    )
+    manual_adjustments = list(
+        db.scalars(
+            select(ManualAdjustment)
+            .where(ManualAdjustment.account_id == account.id)
+            .order_by(ManualAdjustment.effective_at.asc(), ManualAdjustment.id.asc())
+        ).all()
+    )
+    trade_playbooks = list(
+        db.scalars(
+            select(TradePlaybook).where(TradePlaybook.trade_id.in_(all_trade_ids))
+        ).all()
+    ) if all_trade_ids else []
+    checklist_responses = list(
+        db.scalars(
+            select(TradeChecklistResponse).where(TradeChecklistResponse.trade_id.in_(all_trade_ids))
+        ).all()
+    ) if all_trade_ids else []
+    rule_violations = list(
+        db.scalars(
+            select(RuleViolation)
+            .where(RuleViolation.trade_id.in_(all_trade_ids))
+            .order_by(RuleViolation.created_at.asc())
+        ).all()
+    ) if all_trade_ids else []
+    tags_catalog = list(
+        db.scalars(select(Tag).where(Tag.user_id == user.id).order_by(Tag.name.asc())).all()
+    )
+    playbooks = list(
+        db.scalars(select(Playbook).where(Playbook.user_id == user.id).order_by(Playbook.name.asc())).all()
+    )
+    trade_attachments = list(
+        db.scalars(select(Attachment).where(Attachment.trade_id.in_(all_trade_ids))).all()
+    ) if all_trade_ids else []
+    daily_attachments = list(
+        db.scalars(select(Attachment).where(Attachment.daily_journal_id.in_(daily_journal_ids))).all()
+    ) if daily_journal_ids else []
+    attachment_by_id = {item.id: item for item in [*trade_attachments, *daily_attachments]}
+    account_attachments = list(attachment_by_id.values())
+    balance_resolution = resolve_account_balance(db, account)
+    flat_moment_index: list[dict[str, Any]] = []
+
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
         for episode in episodes:
             moments = list(
@@ -2054,6 +2185,11 @@ def export_waverr_research_pack(
                     except FileNotFoundError:
                         payload["screenshot_missing"] = True
                 moment_payloads.append(payload)
+                flat_moment_index.append({
+                    **payload,
+                    "episode_id": str(episode.id),
+                    "export_folder": folder,
+                })
 
             trade = db.get(Trade, episode.matched_trade_id) if episode.matched_trade_id else None
             fills: list[Fill] = []
@@ -2178,11 +2314,87 @@ def export_waverr_research_pack(
                     "folder": folder,
                 }
             )
+            flat_moment_index.append({
+                **payload,
+                "episode_id": None,
+                "export_folder": folder,
+            })
+
+        # Flat account-wide dataset for model/research ingestion. Episode folders
+        # remain the richer chronological representation; these files make bulk
+        # loading deterministic and ensure unjournaled trades are not omitted.
+        trade_payloads: list[dict[str, Any]] = []
+        for item in all_trades:
+            payload = _model_dict(item)
+            payload["tags"] = [
+                {"id": str(tag.id), "name": tag.name, "category": tag.category.value}
+                for tag in item.tags
+            ]
+            trade_payloads.append(payload)
+
+        dataset_tables: dict[str, list[Any]] = {
+            "trades": trade_payloads,
+            "fills": [_model_dict(item) for item in all_fills],
+            "orders": [_model_dict(item) for item in all_orders],
+            "broker_execution_events": [_model_dict(item) for item in live_executions],
+            "daily_balances": [_model_dict(item) for item in daily_balances],
+            "cash_transactions": [_model_dict(item) for item in cash_transactions],
+            "trade_journals": [_model_dict(item) for item in trade_journals],
+            "daily_journals": [_model_dict(item) for item in daily_journals],
+            "weekly_reviews": [_model_dict(item) for item in weekly_reviews],
+            "monthly_reviews": [_model_dict(item) for item in monthly_reviews],
+            "goals": [_model_dict(item) for item in goals],
+            "manual_adjustments": [_model_dict(item) for item in manual_adjustments],
+            "trade_playbooks": [_model_dict(item) for item in trade_playbooks],
+            "trade_checklist_responses": [_model_dict(item) for item in checklist_responses],
+            "rule_violations": [_model_dict(item) for item in rule_violations],
+            "tags_catalog": [_model_dict(item) for item in tags_catalog],
+            "playbooks": [_model_dict(item) for item in playbooks],
+            "companion_moments": flat_moment_index,
+        }
+        for name, values in dataset_tables.items():
+            bundle.writestr(f"dataset/{name}.json", json.dumps(values, indent=2))
+
+        attachment_payloads: list[dict[str, Any]] = []
+        for item in account_attachments:
+            payload = _model_dict(item, exclude={"storage_key"})
+            safe_name = Path(item.original_filename).name
+            attachment_path = f"dataset/attachments/{item.id}-{safe_name}"
+            payload["export_path"] = None
+            try:
+                bundle.writestr(attachment_path, storage.get(item.storage_key))
+                payload["export_path"] = attachment_path
+            except FileNotFoundError:
+                payload["missing_from_storage"] = True
+            attachment_payloads.append(payload)
+        bundle.writestr("dataset/attachments.json", json.dumps(attachment_payloads, indent=2))
+        bundle.writestr(
+            "dataset/account_state.json",
+            json.dumps(
+                {
+                    "account": _model_dict(account),
+                    "balance_resolution": balance_resolution.as_dict(),
+                    "note": "Snapshot/derived balances are context. Canonical trade/fill accounting should remain independently auditable.",
+                },
+                indent=2,
+            ),
+        )
+        bundle.writestr(
+            "dataset/DATA_DICTIONARY.txt",
+            "JournalMe account-wide research dataset\n\n"
+            "trades.json = every current trade row for the selected account; run JournalMe reconciliation after catch-up imports before training.\n"
+            "fills.json = all persisted broker fills from imported reports.\n"
+            "orders.json = all persisted orders, including canceled/rejected activity. Orders are not trades.\n"
+            "broker_execution_events.json = read-only live NinjaTrader execution events with source IDs/provenance.\n"
+            "companion_moments.json = flat index of all Companion moments/captures; knowledge_stage distinguishes live vs retrospective evidence.\n"
+            "Episode folders remain the authoritative chronological human-context representation.\n"
+            "Never use outcome/post-trade data as if it existed at decision time.\n",
+        )
 
         manifest = {
             "product": "JournalMe",
             "export_type": "waverr_research_pack",
-            "schema_version": 1,
+            "schema_version": 2,
             "generated_at": utcnow().isoformat(),
             "account": {
                 "id": str(account.id),
@@ -2196,6 +2408,20 @@ def export_waverr_research_pack(
                 "production_change": "None. Importing this pack must not directly alter live/canary production behavior.",
                 "hindsight_rule": "Respect knowledge_stage and recorded_live. Outcome/review data must not be treated as information available at decision time.",
                 "episode_definition": "An observation timeline that may contain one or many moments and may or may not have a trade.",
+                "account_dataset": "dataset/ contains every current trade/fill/order/live execution row for this account, including trades with no Companion episode.",
+                "pre_export_rule": "After importing catch-up broker reports, reconcile the JournalMe ledger before using this pack for training or statistics.",
+            },
+            "dataset_counts": {
+                "trades": len(all_trades),
+                "fills": len(all_fills),
+                "orders": len(all_orders),
+                "broker_execution_events": len(live_executions),
+                "companion_moments": len(flat_moment_index),
+                "episodes": len(episodes),
+                "legacy_captures": len(legacy_captures),
+                "trade_journals": len(trade_journals),
+                "daily_journals": len(daily_journals),
+                "attachments": len(account_attachments),
             },
             "episodes": episode_index,
             "legacy_captures": legacy_index,
@@ -2206,6 +2432,7 @@ def export_waverr_research_pack(
             "README.txt",
             "JournalMe -> WaveRR Research Pack\n\n"
             "Each episode preserves chronological human observations, optional screenshots, and any matched canonical trade evidence.\n"
+            "The dataset/ folder additionally contains every current trade, fill, order, live broker execution, journal/review row, and account attachment for the selected account, even when no Companion episode exists.\n"
             "Pre-timeline Companion captures are included under legacy_captures so existing research data is not lost.\n"
             "Use recorded_live/knowledge_stage to prevent hindsight leakage. A WAIT/no-trade episode is valid research data.\n"
             "This package is for research only and should flow through WaveRR hypothesis/testing/governance before any production change.\n",

@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useAccount } from "@/components/account-provider";
 import { ErrorState, PageHeader, Skeleton } from "@/components/ui";
-import { API_BASE_URL, api, dateTime } from "@/lib/api";
+import { API_BASE_URL, api } from "@/lib/api";
 import styles from "./connections.module.css";
 
 type BrokerConnection = {
@@ -31,7 +31,7 @@ type IssuedBridgeToken = {
 };
 
 function timeLabel(value: string | null) {
-  return value ? dateTime(value) : "Never";
+  return value ? new Date(value).toLocaleString() : "Never";
 }
 
 export default function ConnectionsPage() {
@@ -149,6 +149,20 @@ export default function ConnectionsPage() {
         ) : undefined}
       />
       {error && <ErrorState message={error} />}
+
+      <section className="card" style={{ marginBottom: "1rem" }}>
+        <div className="section-title">
+          <div>
+            <p className="eyebrow">Desktop capture</p>
+            <h2>JournalMe Chrome Companion</h2>
+          </div>
+          <span>v0.8.2</span>
+        </div>
+        <p className="muted">Install the current Companion on another laptop without cloning the GitHub repository. Download the ZIP, extract it, then open Chrome Extensions → Developer mode → Load unpacked and choose the extracted JournalMe_Companion folder.</p>
+        <div className="button-row">
+          <a className="button primary" href="/downloads/JournalMe_Companion_v0.8.2.zip" download>Download Companion</a>
+        </div>
+      </section>
 
       <section className="connector-principles">
         <article className="card"><span>Live</span><h2>NinjaTrader bridge</h2><p>Executions sync automatically while NinjaTrader is running. The bridge cannot place or modify orders.</p></article>
