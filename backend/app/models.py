@@ -448,6 +448,53 @@ class TradeJournal(Base):
     trade: Mapped[Trade] = relationship(back_populates="journal")
 
 
+class TradeSequence(Base):
+    __tablename__ = "trade_sequences"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        ForeignKey("trading_accounts.id", ondelete="CASCADE"), index=True
+    )
+    title: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    thesis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shared_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lesson_learned: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    members: Mapped[list[TradeSequenceTrade]] = relationship(
+        back_populates="sequence",
+        cascade="all, delete-orphan",
+        order_by="TradeSequenceTrade.sort_order",
+    )
+
+
+class TradeSequenceTrade(Base):
+    __tablename__ = "trade_sequence_trades"
+
+    sequence_id: Mapped[UUID] = mapped_column(
+        ForeignKey("trade_sequences.id", ondelete="CASCADE"), primary_key=True
+    )
+    trade_id: Mapped[UUID] = mapped_column(
+        ForeignKey("trades.id", ondelete="CASCADE"), primary_key=True, unique=True, index=True
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    sequence: Mapped[TradeSequence] = relationship(back_populates="members")
+    trade: Mapped[Trade] = relationship()
+
+    __table_args__ = (
+        Index("ix_trade_sequence_members_order", "sequence_id", "sort_order"),
+    )
+
+
 class DailyJournal(Base):
     __tablename__ = "daily_journals"
 
