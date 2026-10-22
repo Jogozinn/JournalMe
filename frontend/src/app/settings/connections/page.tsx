@@ -1,231 +1,121 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-
 import { useAccount } from "@/components/account-provider";
-import { ErrorState, PageHeader, Skeleton } from "@/components/ui";
+import { ErrorState, Skeleton } from "@/components/ui";
 import { API_BASE_URL, api } from "@/lib/api";
 import styles from "./connections.module.css";
 
-type BrokerConnection = {
-  id: string;
-  account_id: string | null;
-  provider: string;
-  connection_type: string;
-  display_name: string;
-  status: string;
-  external_account_id: string | null;
-  metadata_json: Record<string, unknown>;
-  bridge_key_configured: boolean;
-  bridge_token_prefix: string | null;
-  bridge_token_created_at: string | null;
-  last_seen_at: string | null;
-  last_sync_at: string | null;
+type Connection = {
+  id: string; account_id: string | null; installation_id: string | null;
+  provider: string; connection_type: string; display_name: string; status: string;
+  source_namespace: string | null; source_account_name: string | null;
+  bridge_key_configured: boolean; bridge_token_created_at: string | null;
+  last_seen_at: string | null; last_sync_at: string | null;
+  metadata_json: { pending_uploads?: number; legacy_pending_uploads?: number; last_failure_code?: string | null; last_failure_at?: string | null };
 };
-
-type IssuedBridgeToken = {
-  connection_id: string;
-  bridge_token: string;
-  bridge_token_prefix: string;
-  created_at: string;
-};
-
-function timeLabel(value: string | null) {
-  return value ? new Date(value).toLocaleString() : "Never";
+type Issued = { connection_id: string; bridge_token: string };
+type ImportSession = { id: string; account_id: string | null; status: string; committed_at: string | null; warnings: number; summary: { preview?: { coverage?: { start: string | null; end: string | null } } } };
+const time = (value: string | null) => value ? new Date(value).toLocaleString() : "Never";
+function health(item: Connection) {
+  if (item.status === "removed") return "Disconnected";
+  if (item.status === "pending") return "Pending approval";
+  if (!item.last_seen_at) return "Awaiting heartbeat";
+  return Date.now() - new Date(item.last_seen_at).getTime() < 150_000 ? "Seen recently" : "Offline / stale";
 }
 
 export default function ConnectionsPage() {
-  const { account, accounts } = useAccount();
-  const [connections, setConnections] = useState<BrokerConnection[]>([]);
-  const [issued, setIssued] = useState<IssuedBridgeToken | null>(null);
+  const { accounts, account } = useAccount();
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const [issued, setIssued] = useState<Issued | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<Connection | null>(null);
+  const [selected, setSelected] = useState<Record<string, string>>({});
   const [copied, setCopied] = useState(false);
-  const [bridgeAccountName, setBridgeAccountName] = useState("");
-
-  const load = useCallback(() => {
-    setLoading(true);
-    return api<BrokerConnection[]>("/broker-connections", { cache: "reload" })
-      .then((items) => {
-        setConnections(items);
-        setError("");
-      })
-      .catch((reason: Error) => setError(reason.message))
-      .finally(() => setLoading(false));
+  const [imports, setImports] = useState<ImportSession[]>([]);
+  const load = useCallback(async () => {
+    try { setConnections(await api<Connection[]>("/broker-connections", { cache: "reload" })); setError(""); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Connections could not be loaded."); }
+    finally { setLoading(false); }
   }, []);
-
   useEffect(() => {
     void load();
+    const interval = window.setInterval(() => { void load(); }, 60_000);
+    return () => window.clearInterval(interval);
   }, [load]);
+  useEffect(() => { void api<ImportSession[]>("/imports").then(setImports).catch(() => setImports([])); }, []);
+  const installations = useMemo(() => connections.filter(c => c.connection_type === "bridge_installation" && c.status !== "removed"), [connections]);
+  const sources = useMemo(() => connections.filter(c => c.installation_id), [connections]);
+  const other = useMemo(() => connections.filter(c => !c.installation_id && c.connection_type !== "bridge_installation"), [connections]);
+  const config = issued ? `api_base=${API_BASE_URL}\nbridge_token=${issued.bridge_token}` : "";
+  const latestReport = imports.find(item => item.status === "committed" && item.account_id === account?.id && item.summary?.preview?.coverage?.end);
+  const selectedSources = sources.filter(item => item.account_id === account?.id && item.status !== "removed");
+  const lastSeenForAccount = selectedSources.map(item => item.last_seen_at).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
 
-  async function createNinjaTraderSlot() {
-    if (!account) return;
-    setBusy("create");
-    setError("");
+  async function createInstallation() {
+    setBusy("new"); setError("");
     try {
-      await api("/broker-connections", {
-        method: "POST",
-        body: JSON.stringify({
-          provider: "ninjatrader",
-          connection_type: "desktop_bridge",
-          display_name: `NinjaTrader · ${account.name}`,
-          account_id: account.id,
-          external_account_id: account.external_account_id,
-          metadata_json: { mode: "read_only", stage: "bridge", bridge_version: "0.7.1" },
-        }),
-      });
+      await api("/broker-connections", { method: "POST", body: JSON.stringify({ provider: "ninjatrader", connection_type: "bridge_installation", display_name: "NinjaTrader installation", metadata_json: { read_only: true } }) });
       await load();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Connection could not be created.");
-    } finally {
-      setBusy(null);
-    }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Installation could not be created."); }
+    finally { setBusy(null); }
+  }
+  async function issueKey(item: Connection) {
+    setBusy(item.id); setIssued(null); setCopied(false); setError("");
+    try { setIssued(await api<Issued>(`/broker-connections/${item.id}/bridge-token`, { method: "POST" })); await load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Key could not be issued."); }
+    finally { setBusy(null); }
+  }
+  async function authorize(item: Connection, accountId = selected[item.id]) {
+    if (!accountId) return;
+    setBusy(item.id); setError("");
+    try { await api(`/broker-connections/${item.id}/authorize-source`, { method: "POST", body: JSON.stringify({ account_id: accountId }) }); await load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Account could not be authorized."); }
+    finally { setBusy(null); }
+  }
+  async function disconnect() {
+    if (!confirm) return;
+    const item = confirm; setBusy(item.id); setError("");
+    try { await api(`/broker-connections/${item.id}/disconnect`, { method: "POST" }); if (issued?.connection_id === item.id) setIssued(null); setConfirm(null); await load(); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : "Connection could not be disconnected."); }
+    finally { setBusy(null); }
   }
 
-  async function issueBridgeKey(connection: BrokerConnection) {
-    setBusy(connection.id);
-    setIssued(null);
-    setCopied(false);
-    setError("");
-    try {
-      const result = await api<IssuedBridgeToken>(`/broker-connections/${connection.id}/bridge-token`, {
-        method: "POST",
-      });
-      setIssued(result);
-      setBridgeAccountName(connection.external_account_id ?? "");
-      await load();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Bridge key could not be generated.");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function revokeBridgeKey(connection: BrokerConnection) {
-    setBusy(connection.id);
-    setIssued(null);
-    setCopied(false);
-    setError("");
-    try {
-      await api(`/broker-connections/${connection.id}/bridge-token`, { method: "DELETE" });
-      await load();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Bridge key could not be revoked.");
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  const issuedConnection = useMemo(
-    () => connections.find((item) => item.id === issued?.connection_id) ?? null,
-    [connections, issued],
-  );
-
-  const configText = issued && issuedConnection
-    ? [
-        `api_base=${API_BASE_URL}`,
-        `bridge_token=${issued.bridge_token}`,
-        `account_name=${bridgeAccountName || "REPLACE_WITH_NINJATRADER_ACCOUNT_NAME"}`,
-      ].join("\n")
-    : "";
-
-  async function copyConfig() {
-    if (!configText) return;
-    await navigator.clipboard.writeText(configText);
-    setCopied(true);
-  }
-
-  return (
-    <div className="connections-page">
-      <PageHeader
-        eyebrow="Broker connections"
-        title="One ingestion layer, multiple ways to sync"
-        description="NinjaTrader is the live read-only desktop path. Tradovate catch-up and file import remain recovery paths when the desktop bridge was unavailable."
-        action={account ? (
-          <button className="button primary" type="button" disabled={busy !== null} onClick={() => void createNinjaTraderSlot()}>
-            {busy === "create" ? "Creating…" : "Add NinjaTrader bridge"}
-          </button>
-        ) : undefined}
-      />
-      {error && <ErrorState message={error} />}
-
-      <section className="card" style={{ marginBottom: "1rem" }}>
-        <div className="section-title">
-          <div>
-            <p className="eyebrow">Desktop capture</p>
-            <h2>JournalMe Chrome Companion</h2>
-          </div>
-          <span>v0.8.2</span>
-        </div>
-        <p className="muted">Install the current Companion on another laptop without cloning the GitHub repository. Download the ZIP, extract it, then open Chrome Extensions → Developer mode → Load unpacked and choose the extracted JournalMe_Companion folder.</p>
-        <div className="button-row">
-          <a className="button primary" href="/downloads/JournalMe_Companion_v0.8.2.zip" download>Download Companion</a>
-        </div>
+  return <main className={styles.page}>
+    <header className={styles.header}><p className="eyebrow">Settings / Data sources</p><h1>Broker Connections</h1><p>Connect one read-only NinjaTrader installation, then approve each detected source account for its own JournalMe trading account.</p></header>
+    {error && <ErrorState message={error} />}
+    {loading ? <Skeleton rows={4} /> : <>
+      <section className={`card ${styles.section}`} aria-labelledby="bridge-title">
+        <div className={styles.sectionHeader}><div><p className="eyebrow">Live capture</p><h2 id="bridge-title">NinjaTrader Bridge</h2></div><button className="button primary" onClick={() => void createInstallation()} disabled={busy !== null}>Add installation</button></div>
+        <p className={styles.help}>Executions sync while NinjaTrader runs. Startup checks current-session executions only; it cannot recover older PC-off fills.</p>
+        {!installations.length && <p className={styles.empty}>No installation paired yet. Add one, generate a key, and install the updated AddOn.</p>}
+        {installations.map(item => {
+          const children = sources.filter(source => source.installation_id === item.id);
+          return <div className={styles.installation} key={item.id}>
+            <div className={styles.sectionHeader}><div><strong>{item.display_name}</strong><span className={styles.id}>Installation {item.id.slice(0, 8)}</span></div><span className={styles.badge}>{health(item)}</span></div>
+            <div className={styles.metrics}><div><span>Last bridge contact</span><strong>{time(item.last_seen_at)}</strong></div><div><span>Authorized accounts</span><strong>{children.filter(c => c.account_id && c.status !== "removed").length}</strong></div><div><span>Pending approval</span><strong>{children.filter(c => !c.account_id && c.status !== "removed").length}</strong></div><div><span>Queued uploads</span><strong>{item.metadata_json?.pending_uploads == null && item.metadata_json?.legacy_pending_uploads == null ? "Awaiting report" : (item.metadata_json?.pending_uploads ?? 0) + (item.metadata_json?.legacy_pending_uploads ?? 0)}</strong></div><div><span>Last fill sync</span><strong>{time(children.map(c => c.last_sync_at).filter(Boolean).sort().at(-1) ?? null)}</strong></div></div>
+            <div className={styles.actions}><button className="button" disabled={busy !== null} onClick={() => void issueKey(item)}>{item.bridge_key_configured ? "Rotate key" : "Pair / generate key"}</button><button className="button quiet" disabled={busy !== null} onClick={() => setConfirm(item)}>Disconnect installation</button></div>
+            <small className={styles.help}>Key {item.bridge_key_configured ? `configured ${time(item.bridge_token_created_at)}` : "not configured"}. Rotation immediately invalidates the previous key.</small>
+            {item.metadata_json?.last_failure_code && <small className={styles.help}>Last upload failure: {item.metadata_json.last_failure_code} at {time(item.metadata_json.last_failure_at ?? null)}</small>}
+          </div>;
+        })}
       </section>
-
-      <section className="connector-principles">
-        <article className="card"><span>Live</span><h2>NinjaTrader bridge</h2><p>Executions sync automatically while NinjaTrader is running. The bridge cannot place or modify orders.</p></article>
-        <article className="card"><span>Catch-up</span><h2>Tradovate</h2><p>Future browser or official connectivity can recover periods where the desktop bridge was unavailable.</p></article>
-        <article className="card"><span>Fallback</span><h2>File import</h2><p>The existing importer remains the auditable historical and disaster-recovery path.</p></article>
+      {issued && <section className={`card ${styles.section}`} aria-label="One-time bridge key"><div className={styles.sectionHeader}><h2>Save this key now</h2><button className="button quiet" onClick={() => setIssued(null)}>Done</button></div><p className={styles.help}>Shown only now. Copy this configuration to <code>%USERPROFILE%\Documents\JournalMe\bridge.conf</code> on the NinjaTrader PC. Keep it private.</p><pre className={styles.config}>{config}</pre><button className="button primary" onClick={() => void navigator.clipboard.writeText(config).then(() => setCopied(true)).catch(() => setError("Clipboard access failed. Copy manually."))}>{copied ? "Copied" : "Copy configuration"}</button></section>}
+      <section className={`card ${styles.section}`} aria-labelledby="accounts-title"><div className={styles.sectionHeader}><div><p className="eyebrow">Explicit authorization</p><h2 id="accounts-title">Detected NinjaTrader Accounts</h2></div><button className="button quiet" onClick={() => { setLoading(true); void load(); }}>Refresh</button></div>
+        {!sources.length ? <p className={styles.empty}>Start NinjaTrader with the updated AddOn to detect connected accounts. New accounts remain pending until approved.</p> : <div className={styles.list}>{sources.map(item => <div className={styles.row} key={item.id}>
+          <div><strong>{item.source_account_name}</strong><span className={styles.id}>{item.source_namespace} · {item.id.slice(0, 8)}</span></div>
+          <div><span className={styles.badge}>{item.account_id ? health(item) : "Pending approval"}</span><small>Seen {time(item.last_seen_at)} · Fill {time(item.last_sync_at)}</small></div>
+          <div className={styles.map}>{item.account_id ? <strong>{accounts.find(a => a.id === item.account_id)?.name ?? "Account unavailable"}</strong> : <><select aria-label={`JournalMe destination for ${item.source_account_name}`} value={selected[item.id] ?? ""} onChange={e => setSelected({ ...selected, [item.id]: e.target.value })}><option value="">Choose JournalMe account</option>{accounts.map(a => <option value={a.id} key={a.id}>{a.name}</option>)}</select><button className="button" disabled={!selected[item.id] || busy !== null} onClick={() => void authorize(item)}>Authorize</button></>}{item.status === "removed" && item.account_id ? <button className="button" disabled={busy !== null} onClick={() => void authorize(item, item.account_id!)}>Reconnect</button> : <button className="button quiet" disabled={busy !== null} onClick={() => setConfirm(item)}>Disconnect</button>}</div>
+        </div>)}</div>}
       </section>
-
-      {issued && issuedConnection && (
-        <section className={`card ${styles.bridgeKeyCard}`}>
-          <div className="section-title">
-            <div>
-              <p className="eyebrow">One-time setup</p>
-              <h2>NinjaTrader bridge key generated</h2>
-            </div>
-          </div>
-          <p className="muted">Save this locally on the NinjaTrader PC. JournalMe stores only a hash of the key, so this exact key will not be shown again after you leave this page.</p>
-          <label className={styles.accountNameField}>
-            <span>NinjaTrader account name</span>
-            <input value={bridgeAccountName} onChange={(event) => setBridgeAccountName(event.target.value)} placeholder="Example: LFE05085094850003" />
-            <small>Use the exact account name shown in NinjaTrader Control Center → Accounts.</small>
-          </label>
-          <pre className={styles.bridgeConfigPreview}>{configText}</pre>
-          <div className="button-row">
-            <button className="button primary" type="button" onClick={() => void copyConfig()}>{copied ? "Copied" : "Copy bridge config"}</button>
-          </div>
-          <p className="muted">Create <code>%USERPROFILE%\Documents\JournalMe\bridge.conf</code> and paste the copied contents there. Do not commit or share that file.</p>
-        </section>
-      )}
-
-      {loading ? <Skeleton rows={4} /> : (
-        <section className="card broker-connections-card">
-          <div className="section-title"><div><p className="eyebrow">Registered connectors</p><h2>{connections.length ? `${connections.length} connection${connections.length === 1 ? "" : "s"}` : "No connectors registered yet"}</h2></div></div>
-          {!connections.length ? <p className="muted">Create a NinjaTrader bridge for the selected account. The live bridge remains read-only and feeds the same JournalMe trade history as your other import paths.</p> : (
-            <div className="broker-connection-list">
-              {connections.map((item) => {
-                const linked = accounts.find((candidate) => candidate.id === item.account_id);
-                return (
-                  <article key={item.id}>
-                    <div>
-                      <strong>{item.display_name}</strong>
-                      <span>{item.provider} · {item.connection_type.replaceAll("_", " ")}</span>
-                      {item.provider === "ninjatrader" && item.connection_type === "desktop_bridge" && (
-                        <div className={styles.bridgeActions}>
-                          <button className="button" type="button" disabled={busy === item.id} onClick={() => void issueBridgeKey(item)}>
-                            {busy === item.id ? "Working…" : item.bridge_key_configured ? "Rotate bridge key" : "Generate bridge key"}
-                          </button>
-                          {item.bridge_key_configured && (
-                            <button className="button quiet" type="button" disabled={busy === item.id} onClick={() => void revokeBridgeKey(item)}>Revoke</button>
-                          )}
-                          <small>{item.bridge_key_configured ? `Key configured · ${timeLabel(item.bridge_token_created_at)}` : "No bridge key yet"}</small>
-                        </div>
-                      )}
-                    </div>
-                    <div><span className={`connection-state ${item.status}`}>{item.status}</span><small>{linked?.name ?? "Unmapped account"}</small></div>
-                    <div><span>Last seen</span><small>{timeLabel(item.last_seen_at)}</small></div>
-                    <div><span>Last sync</span><small>{timeLabel(item.last_sync_at)}</small></div>
-                  </article>
-                );
-              })}
-            </div>
-          )}
-        </section>
-      )}
-    </div>
-  );
+      <section className={`card ${styles.section}`}><p className="eyebrow">Recovery / Catch-up</p><h2>Historical catch-up not connected</h2><p className={styles.help}>Gap possible when NinjaTrader or this PC was off. Current-session replay and queued uploads cover only executions the AddOn actually observed. No verified Lucid historical API is connected.</p><p className={styles.help}>{selectedSources.length ? `For ${account?.name}, the last bridge observation was ${time(lastSeenForAccount)}. Any period after that observation is unverified until compared with broker records.` : `No authorized bridge source recorded for ${account?.name ?? "the selected account"}.`}</p><p className={styles.help}>{latestReport ? `Latest committed report for ${account?.name}: ${latestReport.summary.preview?.coverage?.start ?? "unknown"} to ${latestReport.summary.preview?.coverage?.end ?? "unknown"}; committed ${time(latestReport.committed_at)} with ${latestReport.warnings} warning(s). This is report evidence, not proof of complete history.` : `No committed report coverage recorded for ${account?.name ?? "the selected account"}.`}</p><div className={styles.actions}><Link className="button primary" href="/import">Import a broker report</Link><Link className="button" href="/imports">Review import coverage</Link></div><p className={styles.help}>For missing dates, obtain a Tradovate-style broker report or official statement supported by Imports. NinjaTrader&apos;s Control Center Executions CSV covers the current day and its generic format is not supported here.</p></section>
+      <section className={`card ${styles.section}`}><p className="eyebrow">Registered connectors</p><h2>Connections and history</h2><p className={styles.help}>Repeated names are separate records. Check the short ID, destination and last sync before disconnecting an old connector.</p>{!other.length ? <p className={styles.empty}>No other connectors registered.</p> : <div className={styles.list}>{other.map(item => <div className={styles.row} key={item.id}><div><strong>{item.display_name}</strong><span className={styles.id}>{item.provider} · {item.connection_type.replaceAll("_", " ")} · {item.id.slice(0, 8)}</span></div><div><span className={styles.badge}>{health(item)}</span><small>Seen {time(item.last_seen_at)} · Synced {time(item.last_sync_at)}</small></div><div className={styles.map}><strong>{accounts.find(a => a.id === item.account_id)?.name ?? "Unmapped"}</strong>{item.status !== "removed" && <button className="button quiet" disabled={busy !== null} onClick={() => setConfirm(item)}>Disconnect</button>}</div></div>)}</div>}</section>
+      <section className={`card ${styles.section}`}><p className="eyebrow">Other sources</p><h2>File import and Tradovate</h2><p className={styles.help}>Tradovate-style report import is available for historical dates. Direct Tradovate API catch-up is not connected and requires provider eligibility.</p><Link className="button" href="/import">Open file import</Link></section>
+      <section className={`card ${styles.section}`}><p className="eyebrow">Separate capture tool</p><h2>Chrome Companion</h2><p className={styles.help}>Capture and review context from Chrome. The Companion does not supply NinjaTrader execution history.</p><a className="button" href="/downloads/JournalMe_Companion_v0.8.2.zip" download>Download Companion</a></section>
+    </>}
+    {confirm && <div className={styles.dialogBackdrop} role="presentation"><div className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="disconnect-title"><h2 id="disconnect-title">Disconnect this connector?</h2><p>Its key will be revoked and future sync stopped. JournalMe trading accounts, past trades, screenshots, analyses, and learning data stay in place.</p><p className={styles.id}>{confirm.display_name} · {confirm.id.slice(0, 8)}</p><div className={styles.actions}><button className="button" onClick={() => setConfirm(null)}>Cancel</button><button className="button primary" disabled={busy !== null} onClick={() => void disconnect()}>{busy ? "Disconnecting…" : "Disconnect"}</button></div></div></div>}
+  </main>;
 }

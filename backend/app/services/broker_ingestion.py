@@ -272,6 +272,8 @@ def materialize_closed_trades(
                     "source": "broker_live",
                     "provider": connection.provider,
                     "connection_id": str(connection.id),
+                    "source_namespace": connection.source_namespace,
+                    "source_account_name": connection.source_account_name,
                     "execution_ids": sorted({item.event.external_execution_id for item in trip.slices}),
                     "final_execution_id": max(
                         trip.slices,

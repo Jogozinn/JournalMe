@@ -10,8 +10,10 @@ both provider variables are `supabase`; misconfiguration stops startup.
    `SUPABASE_STORAGE_BUCKET`, and a direct `SUPABASE_DB_URL` outside source
    control. Use a direct SSL PostgreSQL URL for Alembic; use a reviewed pooler
    URL only for runtime if its transaction behavior is compatible.
-3. Run `alembic upgrade head` with `JOURNALME_DATA_PROVIDER=supabase` against
-   an empty target. Never point it at the local SQLite database.
+3. Apply schema changes as a separate release step with
+   `python -m app.migrations upgrade` after verifying the target and backup.
+   Supabase mode rejects automatic startup migrations. Never point the migration
+   command at the local SQLite database by accident.
 4. Review and apply `supabase/rls.sql` in the Supabase SQL editor. It is
    defense-in-depth; FastAPI remains the authorization boundary.
 5. Create the intended Supabase Auth user, then pass its UUID explicitly to

@@ -13,7 +13,14 @@ from sqlalchemy.pool import StaticPool
 from app.api.router import router
 from app.auth import get_current_user
 from app.database import Base, get_db
-from app.models import AccountType, BrokerConnection, Trade, TradingAccount, User
+from app.models import (
+    AccountType,
+    BrokerConnection,
+    BrokerExecutionEvent,
+    Trade,
+    TradingAccount,
+    User,
+)
 
 
 def _client() -> tuple[TestClient, Session, User, TradingAccount]:
@@ -180,9 +187,33 @@ def test_partial_exit_round_trip_uses_weighted_exit_price() -> None:
         "source_payload": {},
     }
     events = [
-        {**base, "external_execution_id": "E1", "external_order_id": "O1", "side": "buy", "quantity": "2", "price": "100", "executed_at": "2026-09-28T12:00:00+00:00"},
-        {**base, "external_execution_id": "E2", "external_order_id": "O2", "side": "sell", "quantity": "1", "price": "101", "executed_at": "2026-09-28T12:01:00+00:00"},
-        {**base, "external_execution_id": "E3", "external_order_id": "O3", "side": "sell", "quantity": "1", "price": "102", "executed_at": "2026-09-28T12:02:00+00:00"},
+        {
+            **base,
+            "external_execution_id": "E1",
+            "external_order_id": "O1",
+            "side": "buy",
+            "quantity": "2",
+            "price": "100",
+            "executed_at": "2026-09-28T12:00:00+00:00",
+        },
+        {
+            **base,
+            "external_execution_id": "E2",
+            "external_order_id": "O2",
+            "side": "sell",
+            "quantity": "1",
+            "price": "101",
+            "executed_at": "2026-09-28T12:01:00+00:00",
+        },
+        {
+            **base,
+            "external_execution_id": "E3",
+            "external_order_id": "O3",
+            "side": "sell",
+            "quantity": "1",
+            "price": "102",
+            "executed_at": "2026-09-28T12:02:00+00:00",
+        },
     ]
     for payload in events:
         response = client.post("/api/v1/broker-bridge/executions", json=payload, headers=headers)
@@ -194,3 +225,303 @@ def test_partial_exit_round_trip_uses_weighted_exit_price() -> None:
     assert trade.entry_price == Decimal("100")
     assert trade.exit_price == Decimal("101.5")
     assert trade.gross_pnl == Decimal("6.0000")
+
+
+def test_installation_requires_explicit_mapping_and_scopes_same_execution_ids() -> None:
+    client, db, user, first_account = _client()
+    second_account = TradingAccount(
+        user_id=user.id,
+        name="Lucid Flex 50K #2",
+        external_account_id="LFE-second",
+        provider="lucid",
+        account_type=AccountType.EVALUATION,
+    )
+    db.add(second_account)
+    extra_accounts = [
+        TradingAccount(
+            user_id=user.id,
+            name=f"Lucid Flex 50K #{index}",
+            external_account_id=f"LFE-{index}",
+            provider="lucid",
+            account_type=AccountType.EVALUATION,
+        )
+        for index in range(3, 6)
+    ]
+    db.add_all(extra_accounts)
+    db.commit()
+    installation = client.post(
+        "/api/v1/broker-connections",
+        json={
+            "provider": "ninjatrader",
+            "connection_type": "bridge_installation",
+            "display_name": "NinjaTrader installation",
+        },
+    )
+    assert installation.status_code == 201, installation.text
+    installation_id = installation.json()["id"]
+    token = client.post(f"/api/v1/broker-connections/{installation_id}/bridge-token").json()[
+        "bridge_token"
+    ]
+    headers = {"Authorization": f"Bearer {token}"}
+    destinations = {"LFE-first": first_account, "LFE-second": second_account}
+    destinations.update(
+        {
+            f"LFE-{index}": account
+            for index, account in zip(range(3, 6), extra_accounts, strict=True)
+        }
+    )
+    for name in destinations:
+        response = client.post(
+            "/api/v1/broker-bridge/discovered-accounts",
+            json={
+                "source_namespace": "Lucid connection",
+                "source_account_name": name,
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["approved"] is False
+    sources = client.get("/api/v1/broker-connections").json()
+    children = {
+        item["source_account_name"]: item
+        for item in sources
+        if item["installation_id"] == installation_id
+    }
+    assert len(children) == 5
+    stranger = User(email="other@journalme.local", display_name="Other")
+    db.add(stranger)
+    db.flush()
+    foreign_account = TradingAccount(
+        user_id=stranger.id,
+        name="Other account",
+        provider="lucid",
+        account_type=AccountType.EVALUATION,
+    )
+    db.add(foreign_account)
+    db.commit()
+    assert (
+        client.post(
+            f"/api/v1/broker-connections/{children['LFE-first']['id']}/authorize-source",
+            json={"account_id": str(foreign_account.id)},
+        ).status_code
+        == 404
+    )
+    entry = {
+        "source_namespace": "Lucid connection",
+        "source_account_name": "LFE-first",
+        "external_execution_id": "same-id",
+        "symbol": "MNQ 12-26",
+        "side": "buy",
+        "quantity": "1",
+        "price": "100",
+        "point_value": "2",
+        "executed_at": "2026-09-28T12:00:00+00:00",
+    }
+    assert (
+        client.post("/api/v1/broker-bridge/executions", json=entry, headers=headers).status_code
+        == 409
+    )
+    for name, destination in destinations.items():
+        response = client.post(
+            f"/api/v1/broker-connections/{children[name]['id']}/authorize-source",
+            json={
+                "account_id": str(destination.id),
+            },
+        )
+        assert response.status_code == 200, response.text
+    assert client.post(
+        f"/api/v1/broker-connections/{children['LFE-first']['id']}/authorize-source",
+        json={"account_id": str(destinations["LFE-second"].id)},
+    ).status_code == 409
+    for name in children:
+        payload = {**entry, "source_account_name": name}
+        assert (
+            client.post(
+                "/api/v1/broker-bridge/executions", json=payload, headers=headers
+            ).status_code
+            == 201
+        )
+        assert (
+            client.post("/api/v1/broker-bridge/executions", json=payload, headers=headers).json()[
+                "duplicate"
+            ]
+            is True
+        )
+    events = db.scalars(select(BrokerExecutionEvent)).all()
+    assert len(events) == 5
+    assert {event.account_id for event in events} == {
+        account.id for account in destinations.values()
+    }
+    assert (
+        client.post(
+            "/api/v1/broker-bridge/executions",
+            json={**entry, "source_account_name": "unknown"},
+            headers=headers,
+        ).status_code
+        == 409
+    )
+    first_source_id = children["LFE-first"]["id"]
+    assert (
+        client.post(f"/api/v1/broker-connections/{first_source_id}/disconnect").status_code == 200
+    )
+    assert (
+        client.post("/api/v1/broker-bridge/executions", json=entry, headers=headers).status_code
+        == 409
+    )
+    assert (
+        client.post(
+            f"/api/v1/broker-connections/{first_source_id}/authorize-source",
+            json={"account_id": str(first_account.id)},
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post("/api/v1/broker-bridge/executions", json=entry, headers=headers).json()[
+            "duplicate"
+        ]
+        is True
+    )
+
+
+def test_disconnect_keeps_history_and_revokes_installation_key() -> None:
+    client, db, user, account = _client()
+    installation = client.post(
+        "/api/v1/broker-connections",
+        json={
+            "provider": "ninjatrader",
+            "connection_type": "bridge_installation",
+            "display_name": "NT",
+        },
+    ).json()
+    token = client.post(f"/api/v1/broker-connections/{installation['id']}/bridge-token").json()[
+        "bridge_token"
+    ]
+    headers = {"Authorization": f"Bearer {token}"}
+    source = {"source_namespace": "Lucid", "source_account_name": "LFE"}
+    client.post("/api/v1/broker-bridge/discovered-accounts", json=source, headers=headers)
+    child = next(
+        item
+        for item in client.get("/api/v1/broker-connections").json()
+        if item["installation_id"] == installation["id"]
+    )
+    client.post(
+        f"/api/v1/broker-connections/{child['id']}/authorize-source",
+        json={"account_id": str(account.id)},
+    )
+    event = {
+        **source,
+        "external_execution_id": "E1",
+        "symbol": "MNQ 12-26",
+        "side": "buy",
+        "quantity": "1",
+        "price": "100",
+        "point_value": "2",
+        "executed_at": "2026-09-28T12:00:00+00:00",
+    }
+    assert (
+        client.post("/api/v1/broker-bridge/executions", json=event, headers=headers).status_code
+        == 201
+    )
+    assert (
+        client.post(f"/api/v1/broker-connections/{installation['id']}/disconnect").status_code
+        == 200
+    )
+    assert (
+        client.post("/api/v1/broker-bridge/executions", json=event, headers=headers).status_code
+        == 401
+    )
+    assert (
+        db.scalar(
+            select(BrokerExecutionEvent).where(BrokerExecutionEvent.external_execution_id == "E1")
+        )
+        is not None
+    )
+    assert db.get(TradingAccount, account.id) is not None
+    assert (
+        client.post(f"/api/v1/broker-connections/{installation['id']}/bridge-token").status_code
+        == 409
+    )
+
+
+def test_installation_key_rotation_invalidates_previous_key() -> None:
+    client, _, _, _ = _client()
+    installation = client.post(
+        "/api/v1/broker-connections",
+        json={
+            "provider": "ninjatrader",
+            "connection_type": "bridge_installation",
+            "display_name": "NT",
+        },
+    ).json()
+    path = f"/api/v1/broker-connections/{installation['id']}/bridge-token"
+    first = client.post(path).json()["bridge_token"]
+    second = client.post(path).json()["bridge_token"]
+    assert first != second
+    for token, expected in ((first, 401), (second, 200)):
+        response = client.post(
+            "/api/v1/broker-bridge/heartbeat",
+            json={},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == expected
+
+
+def test_snapshots_stay_with_their_approved_source_account() -> None:
+    client, db, user, first_account = _client()
+    second_account = TradingAccount(
+        user_id=user.id,
+        name="Lucid Flex 50K #2",
+        provider="lucid",
+        account_type=AccountType.EVALUATION,
+    )
+    db.add(second_account)
+    db.commit()
+    installation = client.post(
+        "/api/v1/broker-connections",
+        json={
+            "provider": "ninjatrader",
+            "connection_type": "bridge_installation",
+            "display_name": "NT",
+        },
+    ).json()
+    token = client.post(
+        f"/api/v1/broker-connections/{installation['id']}/bridge-token"
+    ).json()["bridge_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    sources = [
+        {"source_namespace": "Lucid", "source_account_name": name}
+        for name in ("LFE-A", "LFE-B", "LFE-pending")
+    ]
+    for source in sources:
+        assert client.post(
+            "/api/v1/broker-bridge/discovered-accounts", json=source, headers=headers
+        ).status_code == 200
+    children = {
+        item["source_account_name"]: item
+        for item in client.get("/api/v1/broker-connections").json()
+        if item["installation_id"] == installation["id"]
+    }
+    for name, account in (("LFE-A", first_account), ("LFE-B", second_account)):
+        assert client.post(
+            f"/api/v1/broker-connections/{children[name]['id']}/authorize-source",
+            json={"account_id": str(account.id)},
+        ).status_code == 200
+    for source, cash, expected in (
+        (sources[0], "50100", 200),
+        (sources[1], "48750", 200),
+        (sources[2], "99999", 409),
+    ):
+        assert client.post(
+            "/api/v1/broker-bridge/account-snapshot",
+            json={**source, "captured_at": "2026-10-21T12:00:00Z", "cash_value": cash},
+            headers=headers,
+        ).status_code == expected
+    db.expire_all()
+    first_source = db.get(BrokerConnection, UUID(children["LFE-A"]["id"]))
+    second_source = db.get(BrokerConnection, UUID(children["LFE-B"]["id"]))
+    pending_source = db.get(BrokerConnection, UUID(children["LFE-pending"]["id"]))
+    assert first_source.account_id == first_account.id
+    assert second_source.account_id == second_account.id
+    assert first_source.metadata_json["account_snapshot"]["cash_value"] == "50100"
+    assert second_source.metadata_json["account_snapshot"]["cash_value"] == "48750"
+    assert "account_snapshot" not in pending_source.metadata_json

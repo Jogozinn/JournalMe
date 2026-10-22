@@ -144,10 +144,17 @@ class BrokerConnection(Base):
     display_name: Mapped[str] = mapped_column(String(160))
     status: Mapped[str] = mapped_column(String(30), default="disconnected", index=True)
     external_account_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    installation_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("broker_connections.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_namespace: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    source_account_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     bridge_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     bridge_token_prefix: Mapped[str | None] = mapped_column(String(24), nullable=True)
-    bridge_token_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    bridge_token_created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
@@ -159,6 +166,10 @@ class BrokerConnection(Base):
         UniqueConstraint(
             "user_id", "provider", "connection_type", "external_account_id",
             name="uq_broker_connection_external",
+        ),
+        UniqueConstraint(
+            "installation_id", "source_namespace", "source_account_name",
+            name="uq_bridge_installation_source_account",
         ),
     )
 

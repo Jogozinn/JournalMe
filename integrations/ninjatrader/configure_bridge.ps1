@@ -5,13 +5,6 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $AccountName) {
-    $AccountName = Read-Host "Exact NinjaTrader account name"
-}
-if (-not $AccountName) {
-    throw "Account name is required."
-}
-
 $secureToken = Read-Host "Paste the JournalMe bridge key" -AsSecureString
 $token = [System.Net.NetworkCredential]::new("", $secureToken).Password
 if (-not $token) {
@@ -22,11 +15,14 @@ $dir = Join-Path $env:USERPROFILE "Documents\JournalMe"
 New-Item -ItemType Directory -Path $dir -Force | Out-Null
 $path = Join-Path $dir "bridge.conf"
 
-@(
+$lines = @(
     "api_base=$($ApiBase.TrimEnd('/'))"
     "bridge_token=$token"
-    "account_name=$AccountName"
-) | Set-Content -Path $path -Encoding UTF8
+)
+if ($AccountName) {
+    $lines += "account_name=$AccountName"
+}
+[System.IO.File]::WriteAllLines($path, $lines, [System.Text.UTF8Encoding]::new($false))
 
 Write-Host "JournalMe bridge configuration written to: $path"
 Write-Host "Do not commit or share this file."

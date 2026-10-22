@@ -504,9 +504,12 @@ class ManualDeleteRequest(BaseModel):
     confirmation: str
     reason: str = Field(min_length=1, max_length=500)
 
+
 class BrokerConnectionCreate(BaseModel):
     provider: str = Field(min_length=1, max_length=60)
-    connection_type: Literal["desktop_bridge", "browser_session", "official_api", "file_import"]
+    connection_type: Literal[
+        "desktop_bridge", "bridge_installation", "browser_session", "official_api", "file_import"
+    ]
     display_name: str = Field(min_length=1, max_length=160)
     account_id: UUID | None = None
     external_account_id: str | None = Field(default=None, max_length=120)
@@ -538,6 +541,8 @@ class BrokerExecutionIngest(BaseModel):
 
 
 class BrokerBridgeExecutionIngest(BaseModel):
+    source_namespace: str | None = Field(default=None, min_length=1, max_length=160)
+    source_account_name: str | None = Field(default=None, min_length=1, max_length=160)
     external_execution_id: str = Field(min_length=1, max_length=160)
     external_order_id: str | None = Field(default=None, max_length=160)
     symbol: str = Field(min_length=1, max_length=80)
@@ -552,8 +557,26 @@ class BrokerBridgeExecutionIngest(BaseModel):
 
 
 class BrokerBridgeAccountSnapshot(BaseModel):
+    source_namespace: str | None = Field(default=None, min_length=1, max_length=160)
+    source_account_name: str | None = Field(default=None, min_length=1, max_length=160)
     captured_at: datetime
     cash_value: Decimal | None = None
     net_liquidation: Decimal | None = None
     realized_pnl: Decimal | None = None
     unrealized_pnl: Decimal | None = None
+
+
+class BrokerBridgeSourceAccount(BaseModel):
+    source_namespace: str = Field(min_length=1, max_length=160)
+    source_account_name: str = Field(min_length=1, max_length=160)
+
+
+class BrokerBridgeSourceMapping(BaseModel):
+    account_id: UUID
+
+
+class BrokerBridgeHeartbeat(BaseModel):
+    pending_uploads: int = Field(default=0, ge=0)
+    legacy_pending_uploads: int = Field(default=0, ge=0)
+    last_failure_code: str | None = Field(default=None, max_length=50)
+    last_failure_at: datetime | None = None

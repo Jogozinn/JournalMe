@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.auth import get_current_user
@@ -32,10 +33,9 @@ from app.models import (
     ImportStatus,
     Order,
     Playbook,
-    PushSubscription,
-    UserPreference,
     PropRuleProfile,
     PropRuleProfileVersion,
+    PushSubscription,
     Tag,
     Trade,
     TradeJournal,
@@ -43,14 +43,18 @@ from app.models import (
     TradeSequenceTrade,
     TradingAccount,
     User,
+    UserPreference,
 )
 from app.schemas import (
     AccountCreate,
     AccountFromPresetCreate,
     AccountUpdate,
-    BrokerConnectionCreate,
     BrokerBridgeAccountSnapshot,
     BrokerBridgeExecutionIngest,
+    BrokerBridgeHeartbeat,
+    BrokerBridgeSourceAccount,
+    BrokerBridgeSourceMapping,
+    BrokerConnectionCreate,
     BrokerConnectionUpdate,
     BrokerExecutionIngest,
     DailyJournalUpdate,
@@ -67,16 +71,18 @@ from app.schemas import (
     TradeSequenceSave,
 )
 from app.seed import seed_default_tags
-from app.services.broker_bridge_auth import authenticate_bridge_token, issue_bridge_token, revoke_bridge_token
-from app.services.broker_ingestion import materialize_closed_trades
-from app.services.instrument_identity import root_symbol
 from app.services.balance import (
     BalanceResolution,
     resolve_account_balance,
     resolve_account_balances,
 )
+from app.services.broker_bridge_auth import (
+    authenticate_bridge_token,
+    issue_bridge_token,
+    revoke_bridge_token,
+)
+from app.services.broker_ingestion import materialize_closed_trades
 from app.services.import_sessions import build_preview, commit_import
-from app.services.intelligence import build_intelligence_overview
 from app.services.importer import (
     ImportReportValidationError,
     ParsedReport,
@@ -84,6 +90,8 @@ from app.services.importer import (
     exact_duplicate_count,
     parse_report,
 )
+from app.services.instrument_identity import root_symbol
+from app.services.intelligence import build_intelligence_overview
 from app.services.presets import (
     PresetConfigurationError,
     PresetReplacementRequired,
@@ -96,8 +104,6 @@ from app.services.prop_rules import (
     latest_profile_version,
     lucidflex_funded_50k_preset,
 )
-from app.services.review import day_review_status, review_rules, trade_review_statuses
-from app.services.trade_ledger import reconcile_trade_ledger, trading_activity_summary
 from app.services.push_notifications import (
     PushNotice,
     endpoint_hash,
@@ -105,6 +111,8 @@ from app.services.push_notifications import (
     push_configured,
     send_push_to_user,
 )
+from app.services.review import day_review_status, review_rules, trade_review_statuses
+from app.services.trade_ledger import reconcile_trade_ledger, trading_activity_summary
 from app.services.trading_calendar import (
     current_day_for_account,
     fill_trade_date_map,
@@ -1209,7 +1217,6 @@ def dashboard(
     all_journals = list(db.scalars(
         select(DailyJournal).where(DailyJournal.account_id == account_id)
     ).all())
-    account_zone = ZoneInfo(account.timezone)
     today = current_day_for_account(account, mode="trading")
     fill_dates = fill_trade_date_map(db, [trade.id for trade in all_trades])
     if period == "today":
@@ -1441,7 +1448,7 @@ def analytics(account_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
 def intelligence_overview(
     db: Db,
     user: CurrentUser,
-    account_ids: list[UUID] = Query(default=[]),
+    account_ids: Annotated[list[UUID] | None, Query()] = None,
     current_account_id: UUID | None = None,
 ) -> dict[str, Any]:
     statement = select(TradingAccount).where(TradingAccount.user_id == user.id)
@@ -1657,6 +1664,9 @@ def _broker_connection_dict(connection: BrokerConnection) -> dict[str, Any]:
         "display_name": connection.display_name,
         "status": connection.status,
         "external_account_id": connection.external_account_id,
+        "installation_id": str(connection.installation_id) if connection.installation_id else None,
+        "source_namespace": connection.source_namespace,
+        "source_account_name": connection.source_account_name,
         "metadata_json": connection.metadata_json,
         "bridge_key_configured": bool(connection.bridge_token_hash),
         "bridge_token_prefix": connection.bridge_token_prefix,
@@ -1682,6 +1692,12 @@ def list_broker_connections(db: Db, user: CurrentUser) -> list[dict[str, Any]]:
 def create_broker_connection(
     payload: BrokerConnectionCreate, db: Db, user: CurrentUser
 ) -> dict[str, Any]:
+    if payload.connection_type == "bridge_installation" and (
+        payload.provider != "ninjatrader"
+        or payload.account_id is not None
+        or payload.external_account_id is not None
+    ):
+        raise HTTPException(422, "A NinjaTrader installation cannot be mapped to one account.")
     if payload.account_id is not None:
         _account_or_404(db, user, payload.account_id)
     item = BrokerConnection(user_id=user.id, status="disconnected", **payload.model_dump())
@@ -1699,9 +1715,23 @@ def update_broker_connection(
     user: CurrentUser,
 ) -> dict[str, Any]:
     item = _broker_connection_or_404(db, user, connection_id)
+    if item.installation_id is not None or item.connection_type == "bridge_installation":
+        raise HTTPException(
+            409, "Use bridge account mapping and disconnect actions for installation records."
+        )
     updates = payload.model_dump(exclude_unset=True)
     if "account_id" in updates and updates["account_id"] is not None:
         _account_or_404(db, user, updates["account_id"])
+    if "account_id" in updates and updates["account_id"] != item.account_id:
+        has_events = db.scalar(
+            select(BrokerExecutionEvent.id)
+            .where(
+                BrokerExecutionEvent.connection_id == item.id,
+            )
+            .limit(1)
+        )
+        if has_events is not None:
+            raise HTTPException(409, "A connection with executions cannot be reassigned.")
     for key, value in updates.items():
         setattr(item, key, value)
     if updates.get("status") == "connected":
@@ -1712,14 +1742,23 @@ def update_broker_connection(
 
 
 @router.post("/broker-connections/{connection_id}/bridge-token")
-def create_broker_bridge_token(
-    connection_id: UUID, db: Db, user: CurrentUser
-) -> dict[str, Any]:
+def create_broker_bridge_token(connection_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
     item = _broker_connection_or_404(db, user, connection_id)
+    if (
+        item.connection_type not in {"desktop_bridge", "bridge_installation"}
+        or item.installation_id
+    ):
+        raise HTTPException(
+            409, "Bridge keys belong to installations or legacy bridge connections."
+        )
+    if item.status == "removed":
+        raise HTTPException(409, "Disconnected connections cannot be re-paired.")
     issued = issue_bridge_token(item)
     item.status = "disconnected"
     metadata = dict(item.metadata_json or {})
-    metadata["bridge_version"] = "0.7.1"
+    metadata["bridge_version"] = (
+        "0.8.0" if item.connection_type == "bridge_installation" else "0.7.1"
+    )
     metadata["read_only"] = True
     item.metadata_json = metadata
     db.commit()
@@ -1731,10 +1770,10 @@ def create_broker_bridge_token(
     }
 
 
-@router.delete("/broker-connections/{connection_id}/bridge-token", status_code=status.HTTP_204_NO_CONTENT)
-def delete_broker_bridge_token(
-    connection_id: UUID, db: Db, user: CurrentUser
-) -> Response:
+@router.delete(
+    "/broker-connections/{connection_id}/bridge-token", status_code=status.HTTP_204_NO_CONTENT
+)
+def delete_broker_bridge_token(connection_id: UUID, db: Db, user: CurrentUser) -> Response:
     item = _broker_connection_or_404(db, user, connection_id)
     revoke_bridge_token(item)
     item.status = "disconnected"
@@ -1743,10 +1782,10 @@ def delete_broker_bridge_token(
 
 
 @router.post("/broker-connections/{connection_id}/heartbeat")
-def broker_connection_heartbeat(
-    connection_id: UUID, db: Db, user: CurrentUser
-) -> dict[str, Any]:
+def broker_connection_heartbeat(connection_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
     item = _broker_connection_or_404(db, user, connection_id)
+    if item.connection_type == "bridge_installation" or item.installation_id is not None:
+        raise HTTPException(409, "Bridge health is set only by authenticated bridge telemetry.")
     item.status = "connected"
     item.last_seen_at = datetime.now(timezone.utc)
     db.commit()
@@ -1756,13 +1795,162 @@ def broker_connection_heartbeat(
 
 @router.post("/broker-bridge/heartbeat")
 def broker_bridge_heartbeat(
-    db: Db, connection: BridgeConnectionAuth
+    db: Db,
+    connection: BridgeConnectionAuth,
+    payload: BrokerBridgeHeartbeat | None = None,
 ) -> dict[str, Any]:
+    if connection.status == "removed":
+        raise HTTPException(403, "Bridge installation is disconnected.")
     connection.status = "connected"
     connection.last_seen_at = datetime.now(timezone.utc)
+    payload = payload or BrokerBridgeHeartbeat()
+    metadata = dict(connection.metadata_json or {})
+    metadata["pending_uploads"] = payload.pending_uploads
+    metadata["legacy_pending_uploads"] = payload.legacy_pending_uploads
+    metadata["last_failure_code"] = payload.last_failure_code
+    metadata["last_failure_at"] = _timestamp(payload.last_failure_at)
+    connection.metadata_json = metadata
     db.commit()
     db.refresh(connection)
-    return {"status": "ok", "connection_id": str(connection.id), "server_time": _timestamp(datetime.now(timezone.utc))}
+    return {
+        "status": "ok",
+        "connection_id": str(connection.id),
+        "server_time": _timestamp(datetime.now(timezone.utc)),
+    }
+
+
+def _bridge_source_connection(
+    db: Session,
+    installation: BrokerConnection,
+    source_namespace: str | None,
+    source_account_name: str | None,
+) -> BrokerConnection:
+    if installation.status == "removed":
+        raise HTTPException(403, "Bridge installation is disconnected.")
+    if installation.connection_type != "bridge_installation":
+        if (
+            source_account_name
+            and installation.external_account_id
+            and (source_account_name.casefold() != installation.external_account_id.casefold())
+        ):
+            raise HTTPException(403, "Source account does not match this legacy connection.")
+        return installation
+    if not source_namespace or not source_account_name:
+        raise HTTPException(422, "Source connection and account identity are required.")
+    source = db.scalar(
+        select(BrokerConnection).where(
+            BrokerConnection.installation_id == installation.id,
+            BrokerConnection.source_namespace == source_namespace,
+            BrokerConnection.source_account_name == source_account_name,
+            BrokerConnection.user_id == installation.user_id,
+        )
+    )
+    if source is None or source.status == "removed" or source.account_id is None:
+        raise HTTPException(409, "Source account is pending approval or disconnected.")
+    return source
+
+
+@router.post("/broker-bridge/discovered-accounts")
+def broker_bridge_discover_account(
+    payload: BrokerBridgeSourceAccount,
+    db: Db,
+    connection: BridgeConnectionAuth,
+) -> dict[str, Any]:
+    if connection.connection_type != "bridge_installation" or connection.status == "removed":
+        raise HTTPException(409, "Discovery requires an active installation key.")
+    source = db.scalar(
+        select(BrokerConnection).where(
+            BrokerConnection.installation_id == connection.id,
+            BrokerConnection.source_namespace == payload.source_namespace,
+            BrokerConnection.source_account_name == payload.source_account_name,
+        )
+    )
+    if source is None:
+        source = BrokerConnection(
+            user_id=connection.user_id,
+            installation_id=connection.id,
+            provider="ninjatrader",
+            connection_type="desktop_bridge",
+            display_name=("NinjaTrader · " + payload.source_account_name)[:160],
+            source_namespace=payload.source_namespace,
+            source_account_name=payload.source_account_name,
+            status="pending",
+            metadata_json={"read_only": True},
+        )
+        db.add(source)
+    source.last_seen_at = datetime.now(timezone.utc)
+    connection.last_seen_at = source.last_seen_at
+    connection.status = "connected"
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        # A concurrent discovery may have inserted the same source first.
+        source = db.scalar(
+            select(BrokerConnection).where(
+                BrokerConnection.installation_id == connection.id,
+                BrokerConnection.source_namespace == payload.source_namespace,
+                BrokerConnection.source_account_name == payload.source_account_name,
+            )
+        )
+        if source is None:
+            raise
+    return {
+        "status": source.status,
+        "approved": source.account_id is not None and source.status != "removed",
+    }
+
+
+@router.post("/broker-connections/{connection_id}/authorize-source")
+def authorize_bridge_source(
+    connection_id: UUID,
+    payload: BrokerBridgeSourceMapping,
+    db: Db,
+    user: CurrentUser,
+) -> dict[str, Any]:
+    source = _broker_connection_or_404(db, user, connection_id)
+    if source.installation_id is None:
+        raise HTTPException(409, "Only detected source accounts can be authorized.")
+    installation = db.get(BrokerConnection, source.installation_id)
+    if installation is None or installation.user_id != user.id or installation.status == "removed":
+        raise HTTPException(409, "The bridge installation is disconnected.")
+    destination = _account_or_404(db, user, payload.account_id)
+    if source.account_id is not None and source.account_id != destination.id:
+        raise HTTPException(409, "Disconnect this source before changing its journal account.")
+    other = db.scalar(
+        select(BrokerConnection).where(
+            BrokerConnection.installation_id == source.installation_id,
+            BrokerConnection.account_id == destination.id,
+            BrokerConnection.id != source.id,
+            BrokerConnection.status != "removed",
+        )
+    )
+    if other is not None:
+        raise HTTPException(
+            409, "This JournalMe account is already mapped to another active source."
+        )
+    source.account_id = destination.id
+    source.status = "disconnected"
+    db.commit()
+    db.refresh(source)
+    return _broker_connection_dict(source)
+
+
+@router.post("/broker-connections/{connection_id}/disconnect")
+def disconnect_broker_connection(connection_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
+    item = _broker_connection_or_404(db, user, connection_id)
+    if item.connection_type == "bridge_installation":
+        revoke_bridge_token(item)
+        for source in db.scalars(
+            select(BrokerConnection).where(BrokerConnection.installation_id == item.id)
+        ):
+            source.status = "removed"
+    else:
+        revoke_bridge_token(item)
+    item.status = "removed"
+    db.commit()
+    db.refresh(item)
+    return _broker_connection_dict(item)
 
 
 @router.post("/broker-bridge/account-snapshot")
@@ -1771,7 +1959,10 @@ def broker_bridge_account_snapshot(
     db: Db,
     connection: BridgeConnectionAuth,
 ) -> dict[str, Any]:
-    metadata = dict(connection.metadata_json or {})
+    source = _bridge_source_connection(
+        db, connection, payload.source_namespace, payload.source_account_name
+    )
+    metadata = dict(source.metadata_json or {})
     metadata["account_snapshot"] = {
         "captured_at": _timestamp(payload.captured_at),
         "cash_value": _decimal(payload.cash_value),
@@ -1779,11 +1970,11 @@ def broker_bridge_account_snapshot(
         "realized_pnl": _decimal(payload.realized_pnl),
         "unrealized_pnl": _decimal(payload.unrealized_pnl),
     }
-    connection.metadata_json = metadata
-    connection.status = "connected"
-    connection.last_seen_at = datetime.now(timezone.utc)
+    source.metadata_json = metadata
+    source.status = "connected"
+    source.last_seen_at = datetime.now(timezone.utc)
     db.commit()
-    return {"status": "ok", "connection_id": str(connection.id)}
+    return {"status": "ok", "connection_id": str(source.id)}
 
 
 @router.post("/broker-bridge/executions", status_code=status.HTTP_201_CREATED)
@@ -1792,8 +1983,13 @@ def broker_bridge_execution(
     db: Db,
     connection: BridgeConnectionAuth,
 ) -> dict[str, Any]:
+    connection = _bridge_source_connection(
+        db, connection, payload.source_namespace, payload.source_account_name
+    )
     if connection.account_id is None:
-        raise HTTPException(status_code=409, detail="Bridge connection is not mapped to a JournalMe account.")
+        raise HTTPException(
+            status_code=409, detail="Bridge connection is not mapped to a JournalMe account."
+        )
     existing = db.scalar(
         select(BrokerExecutionEvent).where(
             BrokerExecutionEvent.connection_id == connection.id,
@@ -1848,6 +2044,11 @@ def ingest_broker_execution(
     payload: BrokerExecutionIngest, db: Db, user: CurrentUser
 ) -> dict[str, Any]:
     connection = _broker_connection_or_404(db, user, payload.connection_id)
+    if (
+        connection.installation_id is not None
+        or connection.connection_type == "bridge_installation"
+    ):
+        raise HTTPException(409, "Bridge source events require the installation key.")
     account_id = payload.account_id or connection.account_id
     if account_id is not None:
         _account_or_404(db, user, account_id)
@@ -1965,9 +2166,8 @@ def broker_activity(
         ).all()
     )
 
-    event_ids = {event.external_execution_id for event in events}
-    completed_by_execution: dict[str, Trade] = {}
-    if event_ids:
+    completed_by_execution: dict[UUID, Trade] = {}
+    if events:
         recent_trades = list(
             db.scalars(
                 select(Trade)
@@ -1978,25 +2178,24 @@ def broker_activity(
         )
         for trade in recent_trades:
             payload = trade.source_payload or {}
+            source_connection_id = payload.get("connection_id")
             final_execution_id = payload.get("final_execution_id")
-            if final_execution_id and str(final_execution_id) in event_ids:
-                completed_by_execution[str(final_execution_id)] = trade
-                continue
             execution_ids = payload.get("execution_ids")
-            if not isinstance(execution_ids, list):
+            if not final_execution_id and not isinstance(execution_ids, list):
                 continue
-            matching = event_ids.intersection(str(value) for value in execution_ids if value)
-            for execution_id in matching:
-                # Legacy live trades did not record final_execution_id. Only mark
-                # an event completed when its timestamp is the trade's flat time.
-                event = next(
-                    (candidate for candidate in events if candidate.external_execution_id == execution_id),
-                    None,
-                )
-                if event is None:
+            matching_ids = (
+                {str(final_execution_id)}
+                if final_execution_id
+                else {str(value) for value in execution_ids if value}
+            )
+            for event in events:
+                if event.external_execution_id not in matching_ids:
                     continue
-                if abs((_as_aware_utc(event.executed_at) - _as_aware_utc(trade.exit_timestamp)).total_seconds()) <= 1.0:
-                    completed_by_execution[execution_id] = trade
+                if source_connection_id and str(event.connection_id) != str(source_connection_id):
+                    continue
+                delta = _as_aware_utc(event.executed_at) - _as_aware_utc(trade.exit_timestamp)
+                if abs(delta.total_seconds()) <= 1.0:
+                    completed_by_execution[event.id] = trade
 
     return {
         "connections": [_broker_connection_dict(item) for item in connections],
@@ -2018,8 +2217,8 @@ def broker_activity(
                 "ingest_status": item.ingest_status,
                 "market_position": (item.source_payload or {}).get("market_position"),
                 "completed_trade": (
-                    _trade_dict(completed_by_execution[item.external_execution_id])
-                    if item.external_execution_id in completed_by_execution
+                    _trade_dict(completed_by_execution[item.id])
+                    if item.id in completed_by_execution
                     else None
                 ),
             }

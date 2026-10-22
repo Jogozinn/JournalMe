@@ -1,21 +1,19 @@
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
-from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from alembic import command
 from app.api.captures import router as captures_router
 from app.api.phase2 import router as phase2_router
 from app.api.router import router
-from app.config import get_settings
+from app.config import Settings, get_settings
 from app.database import SessionLocal
+from app.migrations import upgrade_database, validate_database_revision
 from app.models import User
 from app.seed import seed_default_tags, seed_starter_playbooks
 from app.services.push_notifications import push_configured, run_push_notification_tick
@@ -23,13 +21,26 @@ from app.services.push_notifications import push_configured, run_push_notificati
 logger = logging.getLogger(__name__)
 
 
-def upgrade_database() -> None:
-    backend_root = Path(__file__).resolve().parents[1]
-    alembic_config = Config(str(backend_root / "alembic.ini"))
-    alembic_config.set_main_option(
-        "script_location", str(backend_root / "alembic")
-    )
-    command.upgrade(alembic_config, "head")
+def prepare_database(settings: Settings | None = None) -> None:
+    settings = settings or get_settings()
+    if settings.auto_migrate:
+        upgrade_database(settings=settings)
+    else:
+        validate_database_revision(settings)
+
+    # Creating the local desktop user and default content is useful in local
+    # SQLite mode. Hosted startup must remain read-only after the revision check.
+    if not settings.bootstrap_local_data:
+        return
+    with SessionLocal() as db:
+        user = db.scalar(select(User).where(User.email == settings.local_user_email))
+        if user is None:
+            user = User(email=settings.local_user_email, display_name=settings.local_user_name)
+            db.add(user)
+            db.flush()
+        seed_default_tags(db, user)
+        seed_starter_playbooks(db, user)
+        db.commit()
 
 
 async def _push_loop() -> None:
@@ -47,19 +58,8 @@ async def _push_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    upgrade_database()
     settings = get_settings()
-    with SessionLocal() as db:
-        user = db.scalar(
-            select(User).where(User.email == settings.local_user_email)
-        )
-        if user is None:
-            user = User(email=settings.local_user_email, display_name=settings.local_user_name)
-            db.add(user)
-            db.flush()
-        seed_default_tags(db, user)
-        seed_starter_playbooks(db, user)
-        db.commit()
+    prepare_database(settings)
     push_task = asyncio.create_task(_push_loop()) if push_configured(settings) else None
     try:
         yield

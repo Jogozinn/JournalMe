@@ -1,25 +1,25 @@
-# JournalMe NinjaTrader Bridge v0.7.1
+# JournalMe NinjaTrader Bridge v0.8.0
 
-This bridge is read-only. It listens to NinjaTrader execution/account events and sends them to JournalMe. It contains no order submission, modification, cancellation, or flattening code.
+The AddOn observes accounts, executions and balance snapshots. It sends data from NinjaTrader to JournalMe only. It has no order placement, modification, cancellation or flattening code.
 
-## Setup
+## Upgrade and pair
 
-1. In JournalMe, open **Settings → Broker connections**.
-2. Create/select the NinjaTrader connection for the JournalMe account.
-3. Choose **Generate bridge key**. The key is shown only when generated/rotated.
-4. On the PC running NinjaTrader, either paste the copied configuration into `%USERPROFILE%\Documents\JournalMe\bridge.conf`, or run:
+1. Verify a restorable database backup and attachment-storage backup before applying Alembic revision `0016`. This migration adds nullable source-identity columns and leaves all legacy connections, events and trades in place. The in-app ZIP export alone is not a database restore procedure. Do not reset the database. See [the rollout checklist](../../docs/NINJATRADER_BRIDGE_ROLLOUT.md).
+2. **Before replacing the old key or configuration**, drain `bridge-queue.txt` with the old single-account key and `account_name`. If `bridge-queue-v2.txt` already exists, run the updated AddOn with that same old key and `account_name` until both queues are empty. Keep both files intact if pending fills remain. The v2 queue is bound to its original connection ID; a different installation key retains its entries rather than reattributing them.
+3. Finish affected trades and switch while positions are flat. In **Settings → Broker Connections**, add one **NinjaTrader installation** and generate its key. The key is displayed once. The existing single-account connection and key remain independent until you disconnect them.
+4. On the NinjaTrader PC, run `./integrations/ninjatrader/configure_bridge.ps1` from PowerShell **without** `-AccountName` and paste the new key when prompted. The helper does not echo it. It writes `%USERPROFILE%\Documents\JournalMe\bridge.conf` locally. Do not commit or share that file.
+5. In NinjaTrader, open **Control Center → New → NinjaScript Editor → AddOns → JournalMeBridge**, replace the old source with `JournalMeBridge.cs`, then press **F5** to compile. Restart NinjaTrader after replacing the AddOn. Remove the old `JournalMeProbe` if still installed.
+6. Open the Connections page and refresh. Each detected source account is identified by its NinjaTrader connection name plus account name. Choose the matching JournalMe trading account and **Authorize**. Repeat for every Lucid account, including later additions. Unknown accounts remain pending.
+7. After the new bridge is verified, disconnect the stale legacy connection on the Connections page. Check its short ID, account mapping and last sync first. Disconnect revokes future access but leaves all historical journal records intact.
 
-```powershell
-cd D:\PythonProjects\JournalMe
-.\integrations\ninjatrader\configure_bridge.ps1 -AccountName LFE05085094850003
-```
+Switch from the legacy connector to the new installation **between completed trades, with affected positions flat and both queues drained**. The old and new connections have separate trade-reconstruction histories; moving an open position between them can split its entry and exit. Current-session replay on the new connection can also overlap executions already journaled through the legacy connector, so review the first session after switching for duplicates before relying on its totals.
 
-The helper prompts for the bridge key without echoing it. `bridge.conf` remains local to the PC. Do not commit or share it.
+After the new AddOn is installed and the old queue is drained, **Disconnect** the exposed legacy connector; this revokes its old key. If the new installation key is ever exposed, use **Rotate key** on its installation card, replace the local key through the configuration helper, and restart NinjaTrader. Rotation invalidates the previous key immediately. Do not paste keys into logs or screenshots.
 
-5. In NinjaTrader: **Control Center → New → NinjaScript Editor → AddOns → New AddOn**. Name it `JournalMeBridge`, replace the generated source with `JournalMeBridge.cs`, and press **F5** to compile.
-6. Remove/disable the older `JournalMeProbe` after the bridge is working so the Output window is not noisy.
-7. Open **Control Center → New → NinjaScript Output**. A configured bridge should show `JournalMeBridge|READY` and `JournalMeBridge|ACCOUNT`.
+## Delivery and recovery
 
-## Reliability
+The bridge journals a fill locally before upload. It retries across restarts, uses source-aware idempotency on the server, and retains rejected or unresolved fills for review. The Connections page shows the last heartbeat, approved sources, reported queue count and latest upload failure. Account snapshots are throttled independently. Source identity uses the NinjaTrader connection configuration name and account name; a broker-issued immutable account ID is not exposed by the documented API used here.
 
-Execution uploads are idempotent by connection + NinjaTrader execution ID. If JournalMe cannot be reached, execution payloads are queued locally at `%USERPROFILE%\Documents\JournalMe\bridge-queue.txt` and retried later. Account snapshots are change-driven/throttled and are not queued.
+At startup the AddOn checks `Account.Executions` for **current-session** fills. [NinjaTrader says this collection is current-session only and does not expose historical local executions through a supported API](https://ninjatrader.com/fr/support/helpguides/nt8/executions.htm). It cannot guarantee recovery of fills made while the PC was off. No Lucid historical API entitlement or stable history IDs have been verified, so automatic PC-off backfill is not connected.
+
+To recover a gap, identify the affected account and dates from the last JournalMe fill/heartbeat, then obtain a broker statement or prior-session report for that account. [NinjaTrader's Control Center Executions tab covers the current day only](https://ninjatrader.com/support/helpGuides/nt8/executions_tab.htm); for previous sessions, use [Trade Performance or a provider statement](https://support.ninjatrader.com/s/article/How-Can-I-Learn-More-About-NinjaTrader-Desktop-Control-Center?language=en_US). The existing JournalMe importer supports Tradovate-style report files through **Imports → New import**. Check its preview warnings and coverage before committing. A generic NinjaTrader grid CSV is not yet a supported import format, so obtain the supported report or a validated conversion before importing. Direct Tradovate/partner API access for Lucid evaluation accounts requires provider confirmation and separate authorized read-only access.
