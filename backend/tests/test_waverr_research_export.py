@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.api import phase2
+from app.api import router as api_router
 from app.auth import get_current_user
 from app.database import Base, get_db
 from app.models import AccountType, CaptureEvent, TradingAccount, TradingEpisode, User
@@ -88,6 +89,7 @@ def test_waverr_research_pack_preserves_live_timeline_and_screenshot(tmp_path, m
     monkeypatch.setattr(phase2, "get_storage_provider", lambda _settings: storage)
     app = FastAPI()
     app.include_router(phase2.router, prefix="/api/v1")
+    app.include_router(api_router.router, prefix="/api/v1")
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_current_user] = override_user
     client = TestClient(app)
@@ -155,11 +157,73 @@ def test_waverr_research_pack_includes_unjournaled_account_trade(tmp_path, monke
             source_quality="ledger_canonical",
             reconciliation_status="reconciled",
         )
-        db.add(trade)
+        losing_trade = Trade(
+            account_id=account.id,
+            duplicate_fingerprint="legitimate-losing-trade",
+            symbol="MNQZ6",
+            root_symbol="MNQ",
+            contract_quantity=Decimal("1"),
+            side=TradeSide.LONG,
+            entry_price=Decimal("30010"),
+            exit_price=Decimal("30005"),
+            gross_pnl=Decimal("-10"),
+            fees=Decimal("2"),
+            net_pnl=Decimal("-12"),
+            currency="USD",
+            entry_timestamp=entry,
+            exit_timestamp=exit_time,
+            duration_seconds=300,
+            source_quality="ledger_canonical",
+            reconciliation_status="reconciled",
+        )
+        superseded_trade = Trade(
+            account_id=account.id,
+            duplicate_fingerprint="superseded-reconciliation-row",
+            symbol="MNQZ6",
+            root_symbol="MNQ",
+            contract_quantity=Decimal("1"),
+            side=TradeSide.LONG,
+            entry_price=Decimal("30000"),
+            exit_price=Decimal("30010"),
+            gross_pnl=Decimal("500"),
+            fees=Decimal("2"),
+            net_pnl=Decimal("498"),
+            currency="USD",
+            entry_timestamp=entry,
+            exit_timestamp=exit_time,
+            duration_seconds=300,
+            source_quality="ledger_canonical",
+            reconciliation_status="reconciled",
+            accounting_status="superseded",
+            accounting_exclusion_reason="Duplicate execution allocation",
+        )
+        quarantined_trade = Trade(
+            account_id=account.id,
+            duplicate_fingerprint="quarantined-source-mismatch",
+            symbol="MNQZ6",
+            root_symbol="MNQ",
+            contract_quantity=Decimal("1"),
+            side=TradeSide.LONG,
+            entry_price=Decimal("30000"),
+            exit_price=Decimal("30010"),
+            gross_pnl=Decimal("100"),
+            fees=Decimal("2"),
+            net_pnl=Decimal("98"),
+            currency="USD",
+            entry_timestamp=entry,
+            exit_timestamp=exit_time,
+            duration_seconds=300,
+            source_quality="ledger_canonical",
+            reconciliation_status="reconciled",
+            accounting_status="quarantined",
+            accounting_exclusion_reason="Source account identity mismatch",
+        )
+        db.add_all([trade, losing_trade, superseded_trade, quarantined_trade])
         db.commit()
         user_id = user.id
         account_id = account.id
         trade_id = trade.id
+        losing_trade_id = losing_trade.id
 
     def override_db():
         with Session(engine) as session:
@@ -172,6 +236,7 @@ def test_waverr_research_pack_includes_unjournaled_account_trade(tmp_path, monke
     monkeypatch.setattr(phase2, "get_storage_provider", lambda _settings: storage)
     app = FastAPI()
     app.include_router(phase2.router, prefix="/api/v1")
+    app.include_router(api_router.router, prefix="/api/v1")
     app.dependency_overrides[get_db] = override_db
     app.dependency_overrides[get_current_user] = override_user
     client = TestClient(app)
@@ -181,14 +246,40 @@ def test_waverr_research_pack_includes_unjournaled_account_trade(tmp_path, monke
     with zipfile.ZipFile(io.BytesIO(response.content)) as bundle:
         manifest = json.loads(bundle.read("manifest.json"))
         assert manifest["schema_version"] == 3
-        assert manifest["dataset_counts"]["trades"] == 1
+        assert manifest["dataset_counts"]["trades"] == 2
         trades = json.loads(bundle.read("dataset/trades.json"))
-        assert len(trades) == 1
-        assert trades[0]["id"] == str(trade_id)
-        assert Decimal(trades[0]["net_pnl"]) == Decimal("38")
-        assert trades[0]["calendar_date"] == "2026-09-30"
-        assert trades[0]["trading_date"] == "2026-09-30"
-        assert trades[0]["trading_date_source"] == "session_rollover_fallback"
+        by_id = {item["id"]: item for item in trades}
+        assert set(by_id) == {str(trade_id), str(losing_trade_id)}
+        assert Decimal(by_id[str(trade_id)]["net_pnl"]) == Decimal("38")
+        assert Decimal(by_id[str(losing_trade_id)]["net_pnl"]) == Decimal("-12")
+        assert by_id[str(trade_id)]["calendar_date"] == "2026-09-30"
+        assert by_id[str(trade_id)]["trading_date"] == "2026-09-30"
+        assert by_id[str(trade_id)]["trading_date_source"] == "session_rollover_fallback"
         dictionary = bundle.read("dataset/DATA_DICTIONARY.txt").decode()
         assert "including trades with no Companion episode" in manifest["research_contract"]["account_dataset"]
         assert "every current trade" in dictionary
+
+    analytics = client.get(
+        "/api/v1/analytics", params={"account_id": str(account_id)}
+    )
+    assert analytics.status_code == 200, analytics.text
+    assert analytics.json()["metrics"]["total_trades"] == 2
+    assert Decimal(analytics.json()["metrics"]["net_pnl"]) == Decimal("26")
+
+    trades_csv = client.get(
+        "/api/v1/exports/trades.csv", params={"account_id": str(account_id)}
+    )
+    assert trades_csv.status_code == 200, trades_csv.text
+    assert "-12.0000" in trades_csv.text
+    assert "498.0000" not in trades_csv.text
+    assert "98.0000" not in trades_csv.text
+    assert len(trades_csv.text.splitlines()) == 3  # header and two included trades
+
+    archive_response = client.get("/api/v1/exports/archive.zip")
+    assert archive_response.status_code == 200, archive_response.text
+    with zipfile.ZipFile(io.BytesIO(archive_response.content)) as bundle:
+        archive_trades = json.loads(bundle.read("data/trades.json"))
+        assert {item["id"] for item in archive_trades} == {
+            str(trade_id),
+            str(losing_trade_id),
+        }

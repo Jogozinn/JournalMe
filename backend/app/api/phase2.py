@@ -74,7 +74,11 @@ from app.schemas import (
     TradePlaybookUpdate,
     UserPreferenceUpdate,
 )
-from app.services.balance import resolve_account_balance, resolve_account_balances
+from app.services.balance import (
+    latest_balance_revisions,
+    resolve_account_balance,
+    resolve_account_balances,
+)
 from app.services.prop_rules import (
     calculate_prop_status,
     create_profile_version,
@@ -85,9 +89,7 @@ from app.services.review import day_review_status, review_rules, trade_review_st
 from app.services.trading_calendar import (
     calendar_date_for_timestamp,
     fallback_trading_date_for_timestamp,
-    fill_trade_date_map,
     group_trades_by_day,
-    trade_day_for_trade,
 )
 from app.storage import get_storage_provider
 
@@ -1315,6 +1317,7 @@ def _calculate_account_prop_status(
             .order_by(DailyBalance.trade_date)
         ).all()
     )
+    balances = latest_balance_revisions(balances)
     adjustments = list(
         db.scalars(
             select(ManualAdjustment)
@@ -1881,7 +1884,10 @@ def export_archive(db: Db, user: CurrentUser) -> StreamingResponse:
     account_balances = resolve_account_balances(db, accounts)
     account_ids = [item.id for item in accounts]
     trades = list(
-        db.scalars(select(Trade).where(Trade.account_id.in_(account_ids))).all()
+        db.scalars(
+            select(Trade)
+            .where(Trade.account_id.in_(account_ids))
+        ).all()
     ) if account_ids else []
     trade_ids = [item.id for item in trades]
     tables: dict[str, list[Any]] = {

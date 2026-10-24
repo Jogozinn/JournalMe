@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -18,6 +19,10 @@ from app.models import (
     Trade,
     TradingAccount,
 )
+from app.services.trading_calendar import (
+    fallback_trading_date_for_timestamp,
+    fill_trade_date_map,
+)
 
 ZERO = Decimal("0")
 TRADE_CASH_TYPES = {"commission", "trade paired"}
@@ -28,12 +33,25 @@ def _utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value
 
 
-def _local_date(value: datetime, zone: ZoneInfo) -> date:
-    return _utc(value).astimezone(zone).date()
-
-
 def _date_as_utc(value: date, zone: ZoneInfo) -> datetime:
     return datetime.combine(value, time.max, tzinfo=zone).astimezone(timezone.utc)
+
+
+def latest_balance_revisions(snapshots: list[DailyBalance]) -> list[DailyBalance]:
+    """Return one latest immutable source revision per date and source."""
+    latest: dict[tuple[date, str], DailyBalance] = {}
+    for item in snapshots:
+        key = (item.trade_date, item.source_identity)
+        current = latest.get(key)
+        if current is None or (item.revision, str(item.id)) > (
+            current.revision,
+            str(current.id),
+        ):
+            latest[key] = item
+    return sorted(
+        latest.values(),
+        key=lambda item: (item.trade_date, item.source_identity, item.revision, str(item.id)),
+    )
 
 
 def _money(value: Decimal | None) -> str | None:
@@ -70,29 +88,49 @@ def _is_approved_adjustment(item: ManualAdjustment) -> bool:
     return getattr(item, "status", "approved") == "approved"
 
 
-def _is_opening_funding(
-    item: CashTransaction,
-    starting_balance: Decimal | None,
-    first_trade_at: datetime | None,
-) -> bool:
-    if item.cash_change_type.strip().lower() != "fund transaction":
-        return False
-    if starting_balance is None or item.delta != starting_balance:
-        return False
-    return first_trade_at is None or _utc(item.timestamp) <= _utc(first_trade_at)
+def _opening_funding_id(
+    account: TradingAccount,
+    cash: list[CashTransaction],
+) -> UUID | None:
+    """Identify an opening deposit from source cash chronology, not trade chronology.
+
+    Imported broker executions may predate the actual account's funding after an
+    erroneous mapping. Counting opening funding on top of ``starting_balance``
+    would then inflate the ledger by the entire original account allocation.
+
+    The first non-trade external cash movement must be an exact starting-balance
+    funding entry and, if source identity is present, must belong to this
+    account. Later matching deposits are real movements and are not suppressed.
+    """
+    if account.starting_balance is None:
+        return None
+    for item in sorted(cash, key=lambda value: (_utc(value.timestamp), str(value.id))):
+        kind = item.cash_change_type.strip().lower()
+        if kind in TRADE_CASH_TYPES:
+            continue
+        if kind != "fund transaction" or item.delta != account.starting_balance:
+            return None
+        source = item.source_payload or {}
+        broker_account = source.get("Account") or source.get("account")
+        if broker_account and account.external_account_id and (
+            str(broker_account).strip().casefold()
+            != account.external_account_id.strip().casefold()
+        ):
+            return None
+        return item.id
+    return None
 
 
 def _cash_delta(
     item: CashTransaction,
     *,
-    starting_balance: Decimal | None,
-    first_trade_at: datetime | None,
+    opening_funding_id: UUID | None,
     has_approved_payouts: bool,
 ) -> Decimal:
     cash_type = item.cash_change_type.strip().lower()
     if cash_type in TRADE_CASH_TYPES:
         return ZERO
-    if _is_opening_funding(item, starting_balance, first_trade_at):
+    if item.id == opening_funding_id:
         return ZERO
     if has_approved_payouts and any(marker in cash_type for marker in PAYOUT_CASH_MARKERS):
         return ZERO
@@ -116,7 +154,10 @@ def resolve_account_balances(
     trades = _group_by_account(
         db.scalars(
             select(Trade)
-            .where(Trade.account_id.in_(account_ids))
+            .where(
+                Trade.account_id.in_(account_ids),
+                Trade.accounting_status == "included",
+            )
             .order_by(Trade.account_id, Trade.exit_timestamp)
         ).all()
     )
@@ -162,6 +203,9 @@ def resolve_account_balances(
             .order_by(DailyBalance.account_id, DailyBalance.trade_date)
         ).all()
     )
+    trade_dates = fill_trade_date_map(
+        db, [item.id for values in trades.values() for item in values]
+    )
     return {
         account.id: _calculate_balance(
             account,
@@ -170,6 +214,7 @@ def resolve_account_balances(
             cash.get(account.id, []),
             payouts.get(account.id, []),
             snapshots.get(account.id, []),
+            trade_dates,
         )
         for account in accounts
     }
@@ -189,17 +234,23 @@ def _calculate_balance(
     cash: list[CashTransaction],
     payouts: list[PropPayoutRecord],
     snapshots: list[DailyBalance],
+    trade_dates: dict[UUID, date],
 ) -> BalanceResolution:
     zone = ZoneInfo(account.timezone)
-    first_trade_at = trades[0].entry_timestamp if trades else None
+    snapshots = latest_balance_revisions(snapshots)
+    def trading_date(value: datetime) -> date:
+        return fallback_trading_date_for_timestamp(value, account.timezone)
+
+    def trade_date(item: Trade) -> date:
+        return trade_dates.get(item.id) or trading_date(item.entry_timestamp)
+    opening_funding_id = _opening_funding_id(account, cash)
     trade_net = sum((item.net_pnl for item in trades), ZERO)
     adjustment_net = sum((item.amount for item in adjustments), ZERO)
     cash_net = sum(
         (
             _cash_delta(
                 item,
-                starting_balance=account.starting_balance,
-                first_trade_at=first_trade_at,
+                opening_funding_id=opening_funding_id,
                 has_approved_payouts=bool(payouts),
             )
             for item in cash
@@ -230,16 +281,25 @@ def _calculate_balance(
         *(_utc(item.effective_at) for item in adjustments),
         *(_utc(item.timestamp) for item in cash if _cash_delta(
             item,
-            starting_balance=account.starting_balance,
-            first_trade_at=first_trade_at,
+            opening_funding_id=opening_funding_id,
             has_approved_payouts=bool(payouts),
         ) != ZERO),
         *(_date_as_utc(item.approved_date, zone) for item in payouts if item.approved_date),
     ]
     latest_activity = max(activity_points, default=None)
-    latest_activity_date = (
-        _local_date(latest_activity, zone) if latest_activity is not None else None
+    activity_dates = [trade_date(item) for item in trades]
+    activity_dates.extend(
+        item.trade_date
+        for item in cash
+        if _cash_delta(
+            item,
+            opening_funding_id=opening_funding_id,
+            has_approved_payouts=bool(payouts),
+        ) != ZERO
     )
+    activity_dates.extend(trading_date(item.effective_at) for item in adjustments)
+    activity_dates.extend(item.approved_date for item in payouts if item.approved_date)
+    latest_activity_date = max(activity_dates, default=None)
     latest_snapshot = snapshots[-1] if snapshots else None
     imported = latest_snapshot.total_amount if latest_snapshot else None
     imported_as_of = latest_snapshot.trade_date if latest_snapshot else None
@@ -258,7 +318,7 @@ def _calculate_balance(
             (
                 item.net_pnl
                 for item in trades
-                if _local_date(item.exit_timestamp, zone) > cutoff
+                if trade_date(item) > cutoff
             ),
             ZERO,
         )
@@ -266,7 +326,7 @@ def _calculate_balance(
             (
                 item.amount
                 for item in adjustments
-                if _local_date(item.effective_at, zone) > cutoff
+                if trading_date(item.effective_at) > cutoff
             ),
             ZERO,
         )
@@ -274,12 +334,11 @@ def _calculate_balance(
             (
                 _cash_delta(
                     item,
-                    starting_balance=account.starting_balance,
-                    first_trade_at=first_trade_at,
+                    opening_funding_id=opening_funding_id,
                     has_approved_payouts=bool(payouts),
                 )
                 for item in cash
-                if _local_date(item.timestamp, zone) > cutoff
+                if item.trade_date > cutoff
             ),
             ZERO,
         )

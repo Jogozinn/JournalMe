@@ -1,3 +1,4 @@
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -18,9 +19,19 @@ from app.models import (
     TradingAccount,
     User,
 )
-from app.services.import_sessions import build_preview, commit_import
+from app.services.import_sessions import (
+    _persist_balances,
+    _persist_cash,
+    _persist_fills,
+    build_preview,
+    commit_import,
+)
 from app.services.importer import (
+    NormalizedBalanceRow,
+    NormalizedCashRow,
+    NormalizedFillRow,
     NormalizedOrderRow,
+    ParsedReport,
     ReportType,
     exact_duplicate_count,
     parse_report,
@@ -216,3 +227,218 @@ def test_real_seven_file_commit_and_reupload_are_atomic_and_idempotent() -> None
         }
         assert db.scalar(select(func.count()).select_from(Trade)) == 9
         assert db.scalar(select(func.count()).select_from(Order)) == 37
+
+
+def test_same_date_balance_correction_is_versioned_and_exact_reimport_is_idempotent() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(email="balance-revision@journalme.local", display_name="Trader")
+        db.add(user)
+        db.flush()
+        account = TradingAccount(
+            user_id=user.id,
+            name="Synthetic account fixture",
+            external_account_id="TEST-TRADOVATE-ACCOUNT",
+            provider="tradovate",
+            starting_balance=50000,
+        )
+        db.add(account)
+        db.flush()
+        batch = ImportSession(user_id=user.id, account_id=account.id, status=ImportStatus.READY)
+        db.add(batch)
+        db.flush()
+        source_file = ImportFile(
+            import_session_id=batch.id,
+            filename="Account Balance History.csv",
+            detected_report_type=ReportType.BALANCE_HISTORY.value,
+            content_hash="first",
+            stored_path="first.csv",
+            header_signature="first",
+        )
+        corrected_file = ImportFile(
+            import_session_id=batch.id,
+            filename="Account Balance History.csv",
+            detected_report_type=ReportType.BALANCE_HISTORY.value,
+            content_hash="corrected",
+            stored_path="corrected.csv",
+            header_signature="corrected",
+        )
+        db.add_all([source_file, corrected_file])
+        db.flush()
+
+        def report(amount: str, realized: str) -> ParsedReport:
+            return ParsedReport(
+                filename="Account Balance History.csv",
+                report_type=ReportType.BALANCE_HISTORY,
+                content_hash=amount,
+                headers=[],
+                rows=[],
+                normalized_rows=[
+                    NormalizedBalanceRow(
+                        row_number=2,
+                        source_payload={
+                            "Account Name": "TEST-TRADOVATE-ACCOUNT",
+                            "Total Amount": amount,
+                        },
+                        trade_date=date(2026, 10, 21),
+                        total_amount=Decimal(amount),
+                        total_realized_pnl=Decimal(realized),
+                        source_account_id="TEST-TRADOVATE-ACCOUNT",
+                        source_account_name="Synthetic account",
+                    )
+                ],
+            )
+
+        assert _persist_balances(db, account, source_file, report("1000.00", "0.00")) == 1
+        db.flush()
+        original = db.scalar(select(DailyBalance))
+        assert original.revision == 1
+
+        corrected = report("1012.50", "12.50")
+        assert _persist_balances(db, account, corrected_file, corrected) == 1
+        db.flush()
+        latest = db.scalar(
+            select(DailyBalance).order_by(DailyBalance.revision.desc())
+        )
+        assert latest.revision == 2
+        assert latest.supersedes_id == original.id
+        assert latest.import_file_id == corrected_file.id
+        assert original.total_amount == Decimal("1000.00")
+        assert original.source_payload == {
+            "Account Name": "TEST-TRADOVATE-ACCOUNT",
+            "Total Amount": "1000.00",
+        }
+
+        assert _persist_balances(db, account, corrected_file, corrected) == 0
+        db.flush()
+        assert db.scalar(select(func.count()).select_from(DailyBalance)) == 2
+
+
+def test_fill_and_cash_reimports_require_full_source_identity() -> None:
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = User(email="source-id@journalme.local", display_name="Trader")
+        db.add(user)
+        db.flush()
+        account = TradingAccount(
+            user_id=user.id,
+            name="Synthetic account fixture",
+            external_account_id="TEST-TRADOVATE-ACCOUNT",
+            provider="tradovate",
+            starting_balance=50000,
+        )
+        db.add(account)
+        db.flush()
+        batch = ImportSession(user_id=user.id, account_id=account.id)
+        db.add(batch)
+        db.flush()
+        source_file = ImportFile(
+            import_session_id=batch.id,
+            filename="Fills (3).csv",
+            detected_report_type=ReportType.FILLS.value,
+            content_hash="report-hash",
+            stored_path="private/fills.csv",
+            header_signature="header-hash",
+        )
+        cash_file = ImportFile(
+            import_session_id=batch.id,
+            filename="Cash History (3).csv",
+            detected_report_type=ReportType.CASH_HISTORY.value,
+            content_hash="cash-hash",
+            stored_path="private/cash.csv",
+            header_signature="header-hash",
+        )
+        db.add_all([source_file, cash_file])
+        db.flush()
+        timestamp = datetime(2026, 10, 22, 14, 30, tzinfo=timezone.utc)
+        fill = Fill(
+            account_id=account.id,
+            import_file_id=source_file.id,
+            external_fill_id="test-fill-001",
+            external_order_id="order-1",
+            symbol="MNQZ6",
+            action="buy",
+            quantity=Decimal("1"),
+            price=Decimal("25000"),
+            commission=Decimal("2.50"),
+            timestamp=timestamp,
+            trade_date=date(2026, 10, 22),
+            product="MNQ",
+            product_description="Micro E-mini Nasdaq-100",
+            source_payload={"Account": "TEST-TRADOVATE-ACCOUNT"},
+        )
+        cash = CashTransaction(
+            account_id=account.id,
+            import_file_id=cash_file.id,
+            external_transaction_id="cash-1",
+            timestamp=timestamp,
+            trade_date=date(2026, 10, 22),
+            delta=Decimal("-2.50"),
+            amount=Decimal("2.50"),
+            cash_change_type="Commission",
+            currency="USD",
+            contract="MNQZ6",
+            source_payload={"Account": "TEST-TRADOVATE-ACCOUNT"},
+        )
+        db.add_all([fill, cash])
+        db.flush()
+
+        def fill_report(*, price: str = "25000", commission: str = "2.50"):
+            return ParsedReport(
+                filename="Fills (3).csv",
+                report_type=ReportType.FILLS,
+                content_hash="report-hash",
+                headers=[],
+                rows=[],
+                normalized_rows=[
+                    NormalizedFillRow(
+                        row_number=2,
+                        source_payload={"Account": "TEST-TRADOVATE-ACCOUNT"},
+                        external_fill_id="test-fill-001",
+                        external_order_id="order-1",
+                        symbol="MNQZ6",
+                        action="buy",
+                        quantity=Decimal("1"),
+                        price=Decimal(price),
+                        commission=Decimal(commission),
+                        timestamp=timestamp,
+                        trade_date=date(2026, 10, 22),
+                        product="MNQ",
+                        product_description="Micro E-mini Nasdaq-100",
+                    )
+                ],
+            )
+
+        def cash_report(*, delta: str = "-2.50"):
+            return ParsedReport(
+                filename="Cash History (3).csv",
+                report_type=ReportType.CASH_HISTORY,
+                content_hash="cash-hash",
+                headers=[],
+                rows=[],
+                normalized_rows=[
+                    NormalizedCashRow(
+                        row_number=2,
+                        source_payload={"Account": "TEST-TRADOVATE-ACCOUNT"},
+                        external_transaction_id="cash-1",
+                        timestamp=timestamp,
+                        trade_date=date(2026, 10, 22),
+                        delta=Decimal(delta),
+                        amount=Decimal("2.50"),
+                        cash_change_type="Commission",
+                        currency="USD",
+                        contract="MNQZ6",
+                    )
+                ],
+            )
+
+        assert _persist_fills(db, account, source_file, fill_report(), {}) == 0
+        assert _persist_cash(db, account, cash_file, cash_report()) == 0
+        with pytest.raises(ValueError, match="Fill test-fill-001.*conflicting source attributes"):
+            _persist_fills(db, account, source_file, fill_report(price="25000.25"), {})
+        with pytest.raises(
+            ValueError, match="Cash transaction cash-1.*conflicting source attributes"
+        ):
+            _persist_cash(db, account, cash_file, cash_report(delta="-3.50"))

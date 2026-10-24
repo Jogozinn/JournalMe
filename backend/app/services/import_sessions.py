@@ -30,6 +30,7 @@ from app.models import (
     User,
     utcnow,
 )
+from app.services.capture_matching import reconcile_unmatched_captures
 from app.services.importer import (
     ImportReportValidationError,
     NormalizedBalanceRow,
@@ -43,12 +44,10 @@ from app.services.importer import (
     report_date_coverage,
     row_get,
 )
-from app.services.capture_matching import reconcile_unmatched_captures
 from app.services.instrument_identity import canonical_contract_key, root_symbol
 from app.services.reconciliation import CanonicalTrade, reconcile_completed_trades
 from app.services.trade_ledger import reconcile_trade_ledger
 from app.storage import FileStorage
-
 
 MATCH_TIME_TOLERANCE_SECONDS = 3.0
 
@@ -102,9 +101,15 @@ def _same_lifecycle(trade: Trade, item: CanonicalTrade) -> bool:
         return False
     if abs(Decimal(trade.exit_price) - item.exit_price) > price_tolerance:
         return False
-    if abs((_as_utc(trade.entry_timestamp) - _as_utc(item.entry_timestamp)).total_seconds()) > MATCH_TIME_TOLERANCE_SECONDS:
+    entry_delta = abs(
+        (_as_utc(trade.entry_timestamp) - _as_utc(item.entry_timestamp)).total_seconds()
+    )
+    if entry_delta > MATCH_TIME_TOLERANCE_SECONDS:
         return False
-    if abs((_as_utc(trade.exit_timestamp) - _as_utc(item.exit_timestamp)).total_seconds()) > MATCH_TIME_TOLERANCE_SECONDS:
+    exit_delta = abs(
+        (_as_utc(trade.exit_timestamp) - _as_utc(item.exit_timestamp)).total_seconds()
+    )
+    if exit_delta > MATCH_TIME_TOLERANCE_SECONDS:
         return False
     return True
 
@@ -123,6 +128,19 @@ def _legacy_components(trades: list[Trade], item: CanonicalTrade) -> list[Trade]
 def _find_preferred_existing_trade(
     trades: list[Trade], item: CanonicalTrade
 ) -> tuple[Trade | None, list[Trade]]:
+    included_trades = [
+        trade for trade in trades if trade.accounting_status == "included"
+    ]
+    excluded_exact = next(
+        (
+            trade
+            for trade in trades
+            if trade.accounting_status != "included"
+            and trade.duplicate_fingerprint == item.fingerprint
+        ),
+        None,
+    )
+    trades = included_trades
     lifecycle_matches = [trade for trade in trades if _same_lifecycle(trade, item)]
     live_matches = [trade for trade in lifecycle_matches if _is_live_trade(trade)]
     exact = next(
@@ -141,6 +159,8 @@ def _find_preferred_existing_trade(
         # is promoted to the flat-to-flat lifecycle and the other lot-pair rows are
         # safely collapsed into it during commit.
         return components[0], components
+    if excluded_exact is not None:
+        return excluded_exact, []
     return None, components
 
 
@@ -351,7 +371,8 @@ def build_preview(
     duplicate_rows = exact_duplicates
     if lifecycle_consolidations:
         warnings.append(
-            f"{lifecycle_consolidations} paired lot row(s) were consolidated into flat-to-flat trade lifecycles."
+            f"{lifecycle_consolidations} paired lot row(s) were consolidated into "
+            "flat-to-flat trade lifecycles."
         )
     return {
         "reports": [
@@ -476,7 +497,11 @@ def commit_import(
     )
     trade_by_fill: dict[str, Trade] = {}
     existing_trades = list(
-        db.scalars(select(Trade).where(Trade.account_id == account.id)).all()
+        db.scalars(
+            select(Trade)
+            .where(Trade.account_id == account.id)
+            .execution_options(include_excluded_accounting=True)
+        ).all()
     )
     reconciled_trades = 0
     collapsed_legacy_trades = 0
@@ -524,6 +549,17 @@ def commit_import(
             existing_trades.append(trade)
             counts["trades"] += 1
         else:
+            if trade.accounting_status != "included":
+                # Keep the original row and evidence immutable. It still owns
+                # this fingerprint, so an idempotent reimport must not recreate
+                # or revive the excluded accounting record.
+                reconciliation_warnings.append(
+                    "A matching trade is superseded or quarantined; its original "
+                    "amounts and evidence were preserved."
+                )
+                for fill_id in item.fill_ids:
+                    trade_by_fill[fill_id] = trade
+                continue
             # The preferred target may be an existing live trade or one of the old
             # Tradovate lot-pair rows. Collapse only duplicate rows that do not
             # contain user-authored JournalMe content.
@@ -608,10 +644,53 @@ def _persist_fills(
         )
         if existing_fill is not None:
             target_trade = trade_by_fill.get(row.external_fill_id)
-            if target_trade is not None and existing_fill.trade_id != target_trade.id:
+            # An external ID is an idempotency key, not proof that two rows are
+            # the same execution.  Fail closed on any source-field conflict;
+            # silently enriching or relinking an existing execution can move
+            # accounting between trade lifecycles without an audit image.
+            expected = (
+                row.external_order_id,
+                row.symbol,
+                row.action,
+                row.quantity,
+                row.price,
+                row.commission,
+                _as_utc(row.timestamp),
+                row.trade_date,
+                row.product,
+                row.product_description,
+            )
+            actual = (
+                existing_fill.external_order_id,
+                existing_fill.symbol,
+                existing_fill.action,
+                Decimal(existing_fill.quantity),
+                Decimal(existing_fill.price),
+                (
+                    Decimal(existing_fill.commission)
+                    if existing_fill.commission is not None
+                    else None
+                ),
+                _as_utc(existing_fill.timestamp),
+                existing_fill.trade_date,
+                existing_fill.product,
+                existing_fill.product_description,
+            )
+            if actual != expected:
+                raise ValueError(
+                    f"Fill {row.external_fill_id} already exists with conflicting "
+                    "source attributes."
+                )
+            if (
+                target_trade is not None
+                and existing_fill.trade_id is not None
+                and existing_fill.trade_id != target_trade.id
+            ):
+                raise ValueError(
+                    f"Fill {row.external_fill_id} is already allocated to another trade."
+                )
+            if target_trade is not None and existing_fill.trade_id is None:
                 existing_fill.trade_id = target_trade.id
-            if existing_fill.commission is None and row.commission is not None:
-                existing_fill.commission = row.commission
             continue
         fill = Fill(
             account_id=account.id,
@@ -689,13 +768,29 @@ def _persist_cash(
     for row in report.normalized_rows:
         if not isinstance(row, NormalizedCashRow):
             continue
-        if db.scalar(
-            select(CashTransaction.id).where(
+        existing = db.scalar(
+            select(CashTransaction).where(
                 CashTransaction.account_id == account.id,
                 CashTransaction.external_transaction_id
                 == row.external_transaction_id,
             )
-        ):
+        )
+        if existing is not None:
+            expected = (
+                _as_utc(row.timestamp), row.trade_date, row.delta, row.amount,
+                row.cash_change_type, row.currency or account.currency, row.contract,
+            )
+            actual = (
+                _as_utc(existing.timestamp), existing.trade_date,
+                Decimal(existing.delta), Decimal(existing.amount),
+                existing.cash_change_type, existing.currency, existing.contract,
+            )
+            if actual != expected:
+                raise ValueError(
+                    "Cash transaction "
+                    f"{row.external_transaction_id} already exists with conflicting "
+                    "source attributes."
+                )
             continue
         db.add(
             CashTransaction(
@@ -729,14 +824,29 @@ def _persist_balances(
         source_identity = (
             f"tradovate:{row.source_account_id or row.source_account_name or 'unknown'}"
         )
-        if db.scalar(
-            select(DailyBalance.id).where(
+        current = db.scalar(
+            select(DailyBalance)
+            .where(
                 DailyBalance.account_id == account.id,
                 DailyBalance.trade_date == row.trade_date,
                 DailyBalance.source_identity == source_identity,
             )
-        ):
-            continue
+            .order_by(DailyBalance.revision.desc(), DailyBalance.id.desc())
+            .limit(1)
+            .with_for_update()
+        )
+        if current is not None:
+            if (
+                current.total_amount == row.total_amount
+                and current.total_realized_pnl == row.total_realized_pnl
+                and (current.source_payload or {}) == row.source_payload
+            ):
+                continue
+            revision = current.revision + 1
+            supersedes_id = current.id
+        else:
+            revision = 1
+            supersedes_id = None
         db.add(
             DailyBalance(
                 account_id=account.id,
@@ -745,6 +855,8 @@ def _persist_balances(
                 total_amount=row.total_amount,
                 total_realized_pnl=row.total_realized_pnl,
                 source_identity=source_identity,
+                revision=revision,
+                supersedes_id=supersedes_id,
                 source_payload=row.source_payload,
             )
         )

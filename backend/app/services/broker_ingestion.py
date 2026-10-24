@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.domain import TradeSide
-from app.models import BrokerConnection, BrokerExecutionEvent, Trade
+from app.models import BrokerConnection, BrokerExecutionEvent, Trade, TradingAccount
 from app.services.capture_matching import reconcile_unmatched_captures
 from app.services.instrument_identity import canonical_contract_key, root_symbol
 
@@ -197,6 +197,77 @@ def _fingerprint(connection: BrokerConnection, trip: CompletedRoundTrip) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
+def _event_source_mismatch(event: BrokerExecutionEvent, account: TradingAccount) -> bool:
+    """Never materialize a recorded execution from a different broker account."""
+    payload = event.source_payload or {}
+    source_name = payload.get("ninjatrader_account")
+    expected = account.external_account_id
+    return bool(source_name and expected and str(source_name).strip().casefold() != expected.strip().casefold())
+
+
+def _trip_allocation_rows(trip: CompletedRoundTrip) -> list[dict[str, str]]:
+    return [
+        {
+            "execution_id": item.event.external_execution_id,
+            "role": item.role,
+            "quantity": str(item.quantity),
+        }
+        for item in trip.slices
+    ]
+
+
+def _trip_overlaps_persisted(
+    trip: CompletedRoundTrip,
+    existing_trades: list[Trade],
+    connection: BrokerConnection,
+) -> bool:
+    """Fail closed on duplicate execution consumption across saved round trips.
+
+    A reversing execution may legitimately be split across a closing trip and an
+    opening trip. New trade records carry allocated quantities so we can prove
+    that those disjoint slices stay within the original fill quantity. Old
+    records without allocation detail are ambiguous and require reconciliation.
+    """
+    proposed: dict[str, Decimal] = {}
+    source_qty: dict[str, Decimal] = {}
+    for item in trip.slices:
+        execution_id = item.event.external_execution_id
+        proposed[execution_id] = proposed.get(execution_id, Decimal("0")) + item.quantity
+        source_qty[execution_id] = Decimal(item.event.quantity)
+
+    already_consumed: dict[str, Decimal] = {}
+    for trade in existing_trades:
+        payload = trade.source_payload or {}
+        if payload.get("connection_id") != str(connection.id):
+            continue
+        ids = set(payload.get("execution_ids") or [])
+        overlapping = ids.intersection(proposed)
+        if not overlapping:
+            continue
+        rows = payload.get("execution_allocations")
+        if not isinstance(rows, list):
+            return True  # Original record's allocation is not auditable.
+        for row in rows:
+            if not isinstance(row, dict):
+                return True
+            eid = row.get("execution_id")
+            if eid not in overlapping:
+                continue
+            try:
+                qty = Decimal(str(row["quantity"]))
+            except (KeyError, ValueError, TypeError):
+                return True
+            if qty <= 0:
+                return True
+            already_consumed[eid] = already_consumed.get(eid, Decimal("0")) + qty
+        if any(eid not in {row.get("execution_id") for row in rows} for eid in overlapping):
+            return True
+    return any(
+        quantity + already_consumed.get(execution_id, Decimal("0")) > source_qty[execution_id]
+        for execution_id, quantity in proposed.items()
+    )
+
+
 def materialize_closed_trades(
     db: Session,
     connection: BrokerConnection,
@@ -204,6 +275,9 @@ def materialize_closed_trades(
     symbol: str | None = None,
 ) -> list[Trade]:
     if connection.account_id is None:
+        return []
+    account = db.get(TradingAccount, connection.account_id)
+    if account is None:
         return []
     statement = select(BrokerExecutionEvent).where(
         BrokerExecutionEvent.connection_id == connection.id,
@@ -219,7 +293,20 @@ def materialize_closed_trades(
         ]
     if not events:
         return []
+    if any(_event_source_mismatch(event, account) for event in events):
+        # Quarantine materialization for this account/connection: filtering the
+        # wrong-account executions would leave an untrustworthy position path.
+        for event in events:
+            if _event_source_mismatch(event, account):
+                event.ingest_status = "needs_reconciliation"
+        return []
 
+    existing_broker_trades = list(db.scalars(
+        select(Trade).where(
+            Trade.account_id == connection.account_id,
+            Trade.source_quality == "broker_live",
+        ).execution_options(include_excluded_accounting=True)
+    ).all())
     by_symbol: dict[str, list[BrokerExecutionEvent]] = {}
     for event in events:
         contract_key = canonical_contract_key(event.symbol, event.executed_at)
@@ -234,10 +321,16 @@ def materialize_closed_trades(
                 select(Trade).where(
                     Trade.account_id == connection.account_id,
                     Trade.duplicate_fingerprint == fingerprint,
-                )
+                ).execution_options(include_excluded_accounting=True)
             )
             if existing is not None:
                 used_event_ids.update(item.event.id for item in trip.slices)
+                continue
+            if _trip_overlaps_persisted(trip, existing_broker_trades, connection):
+                # Keep raw broker executions, but never add another balance-
+                # affecting trade until the overlap has been reconciled.
+                for item in trip.slices:
+                    item.event.ingest_status = "needs_reconciliation"
                 continue
             buy_ids = sorted({item.event.external_execution_id for item in trip.slices if _side_sign(item.event.side) > 0})
             sell_ids = sorted({item.event.external_execution_id for item in trip.slices if _side_sign(item.event.side) < 0})
@@ -275,6 +368,7 @@ def materialize_closed_trades(
                     "source_namespace": connection.source_namespace,
                     "source_account_name": connection.source_account_name,
                     "execution_ids": sorted({item.event.external_execution_id for item in trip.slices}),
+                    "execution_allocations": _trip_allocation_rows(trip),
                     "final_execution_id": max(
                         trip.slices,
                         key=lambda item: (_as_utc(item.event.executed_at), item.event.created_at, str(item.event.id)),
@@ -287,11 +381,12 @@ def materialize_closed_trades(
             db.add(trade)
             db.flush()
             created.append(trade)
+            existing_broker_trades.append(trade)
             used_event_ids.update(item.event.id for item in trip.slices)
 
     if used_event_ids:
         for event in events:
-            if event.id in used_event_ids:
+            if event.id in used_event_ids and event.ingest_status != "needs_reconciliation":
                 event.ingest_status = "materialized"
     if created:
         reconcile_unmatched_captures(db, connection.user_id, account_id=connection.account_id)

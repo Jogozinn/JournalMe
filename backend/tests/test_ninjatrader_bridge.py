@@ -525,3 +525,79 @@ def test_snapshots_stay_with_their_approved_source_account() -> None:
     assert first_source.metadata_json["account_snapshot"]["cash_value"] == "50100"
     assert second_source.metadata_json["account_snapshot"]["cash_value"] == "48750"
     assert "account_snapshot" not in pending_source.metadata_json
+
+
+def test_late_backfill_cannot_create_second_profit_trade_reusing_executions() -> None:
+    """A changed reconstruction fingerprint must not double-consume live fills."""
+    client, db, _, account = _client()
+    _, token = _create_connection_and_token(client, account)
+    headers = {"Authorization": f"Bearer {token}"}
+    def deliver(execution_id: str, side: str, qty: str, price: str, time: str):
+        response = client.post("/api/v1/broker-bridge/executions", json={
+            "external_execution_id": execution_id,
+            "external_order_id": execution_id,
+            "symbol": "MNQ 12-26", "side": side, "quantity": qty,
+            "price": price, "point_value": "2", "currency": "USD",
+            "executed_at": time, "source_payload": {"ninjatrader_account": account.external_account_id},
+        }, headers=headers)
+        assert response.status_code == 201, response.text
+        return response.json()
+    deliver("E1", "buy", "1", "100", "2026-10-23T10:00:00Z")
+    original = deliver("E2", "sell", "1", "101", "2026-10-23T10:02:00Z")
+    assert len(original["trade_ids"]) == 1
+    persisted = db.get(Trade, UUID(original["trade_ids"][0]))
+    # Contract labels can change during feed corrections. Execution identity is
+    # still global to this connection and cannot be consumed a second time.
+    persisted.source_payload["canonical_contract"] = "MNQ|unrelated-contract-label"
+    db.flush()
+    deliver("E0", "buy", "1", "99", "2026-10-23T09:59:00Z")
+    later = deliver("E3", "sell", "1", "102", "2026-10-23T10:03:00Z")
+    assert later["trade_ids"] == []
+    trades = list(db.scalars(select(Trade).where(Trade.account_id == account.id)))
+    assert len(trades) == 1
+    assert trades[0].gross_pnl == Decimal("2")
+    assert db.scalar(select(BrokerExecutionEvent).where(
+        BrokerExecutionEvent.external_execution_id == "E3"
+    )).ingest_status == "needs_reconciliation"
+
+
+def test_reversal_split_allows_disjoint_allocations_but_no_double_consumption() -> None:
+    client, db, _, account = _client()
+    _, token = _create_connection_and_token(client, account)
+    headers = {"Authorization": f"Bearer {token}"}
+    base = {"symbol": "MNQ 12-26", "point_value": "2", "currency": "USD", "commission": None,
+            "source_payload": {"ninjatrader_account": account.external_account_id}}
+    for eid, side, qty, price, minute in [
+        ("REV-E1", "buy", "1", "100", 0),
+        ("REV-E2", "sell", "2", "101", 1),
+        ("REV-E3", "buy", "1", "99", 2),
+    ]:
+        response = client.post("/api/v1/broker-bridge/executions", json={
+            **base, "external_execution_id": eid, "external_order_id": eid,
+            "side": side, "quantity": qty, "price": price,
+            "executed_at": f"2026-10-23T11:{minute:02d}:00Z",
+        }, headers=headers)
+        assert response.status_code == 201, response.text
+    trades = list(db.scalars(select(Trade).where(Trade.account_id == account.id)))
+    assert len(trades) == 2
+    assert [t.gross_pnl for t in sorted(trades, key=lambda t: t.entry_timestamp)] == [Decimal("2"), Decimal("4")]
+    assert all(t.source_payload.get("execution_allocations") for t in trades)
+
+
+def test_foreign_source_account_blocks_materialization_without_dropping_raw_events() -> None:
+    client, db, _, account = _client()
+    _, token = _create_connection_and_token(client, account)
+    headers = {"Authorization": f"Bearer {token}"}
+    for eid, side, minute in [("wrong-1", "buy", 0), ("wrong-2", "sell", 1)]:
+        response = client.post("/api/v1/broker-bridge/executions", json={
+            "external_execution_id": eid, "external_order_id": eid,
+            "symbol": "MNQ 12-26", "side": side, "quantity": "1",
+            "price": "100", "point_value": "2", "currency": "USD",
+            "executed_at": f"2026-10-23T12:{minute:02d}:00Z",
+            "source_payload": {"ninjatrader_account": "OTHER-ACCOUNT"},
+        }, headers=headers)
+        assert response.status_code == 201, response.text
+    assert not list(db.scalars(select(Trade).where(Trade.account_id == account.id)))
+    events = list(db.scalars(select(BrokerExecutionEvent)))
+    assert len(events) == 2
+    assert all(event.ingest_status == "needs_reconciliation" for event in events)

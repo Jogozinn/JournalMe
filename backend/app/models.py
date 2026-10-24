@@ -19,8 +19,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, Session, mapped_column, relationship, with_loader_criteria
 
 from app.database import Base
 from app.domain import TradeSide
@@ -295,6 +296,13 @@ class Trade(Base):
     tick_size: Mapped[Decimal | None] = mapped_column(PRICE, nullable=True)
     source_quality: Mapped[str] = mapped_column(String(40), default="paired_report")
     reconciliation_status: Mapped[str] = mapped_column(String(40), default="reconciled")
+    accounting_status: Mapped[str] = mapped_column(
+        String(24), default="included", server_default="included", index=True
+    )
+    accounting_exclusion_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    superseded_by_trade_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("trades.id", ondelete="SET NULL"), nullable=True
+    )
     source_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -315,6 +323,26 @@ class Trade(Base):
         UniqueConstraint("account_id", "duplicate_fingerprint", name="uq_trade_fingerprint"),
         Index("ix_trade_account_entry", "account_id", "entry_timestamp"),
     )
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _exclude_nonaccounting_trades(execute_state) -> None:
+    """Keep superseded/quarantined trades out of every accounting read by default.
+
+    Excluded source rows remain directly available for audit, but are omitted
+    from accounting and research reads by default.
+    """
+    if (
+        execute_state.is_select
+        and not execute_state.execution_options.get("include_excluded_accounting")
+    ):
+        execute_state.statement = execute_state.statement.options(
+            with_loader_criteria(
+                Trade,
+                lambda trade: trade.accounting_status == "included",
+                include_aliases=True,
+            )
+        )
 
 
 class Fill(Base):
@@ -415,11 +443,16 @@ class DailyBalance(Base):
     total_amount: Mapped[Decimal] = mapped_column(MONEY)
     total_realized_pnl: Mapped[Decimal] = mapped_column(MONEY)
     source_identity: Mapped[str] = mapped_column(String(120), default="tradovate")
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    supersedes_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("daily_balances.id", ondelete="SET NULL"), nullable=True
+    )
     source_payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
 
     __table_args__ = (
         UniqueConstraint(
-            "account_id", "trade_date", "source_identity", name="uq_daily_balance_source"
+            "account_id", "trade_date", "source_identity", "revision",
+            name="uq_daily_balance_revision"
         ),
     )
 

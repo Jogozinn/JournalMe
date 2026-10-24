@@ -73,6 +73,7 @@ from app.schemas import (
 from app.seed import seed_default_tags
 from app.services.balance import (
     BalanceResolution,
+    latest_balance_revisions,
     resolve_account_balance,
     resolve_account_balances,
 )
@@ -571,7 +572,7 @@ def restore_account(account_id: UUID, db: Db, user: CurrentUser) -> dict[str, An
     )
 
 
-@router.delete("/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/accounts/{account_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def deactivate_account(account_id: UUID, db: Db, user: CurrentUser) -> None:
     account = _account_or_404(db, user, account_id)
     account.active = False
@@ -1382,6 +1383,7 @@ def analytics(account_id: UUID, db: Db, user: CurrentUser) -> dict[str, Any]:
         .where(DailyBalance.account_id == account_id)
         .order_by(DailyBalance.trade_date)
     ).all()
+    balances = latest_balance_revisions(balances)
     account_zone = ZoneInfo(account.timezone)
     fill_dates = fill_trade_date_map(db, [trade.id for trade in trades])
     starting_cash = db.scalar(
@@ -2300,7 +2302,7 @@ def update_tag(
     }
 
 
-@router.delete("/tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/tags/{tag_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def delete_tag(tag_id: UUID, db: Db, user: CurrentUser) -> None:
     tag = db.scalar(select(Tag).where(Tag.id == tag_id, Tag.user_id == user.id))
     if tag is None:
@@ -2413,7 +2415,7 @@ def attachment_content(
     )
 
 
-@router.delete("/attachments/{attachment_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/attachments/{attachment_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def delete_attachment(attachment_id: UUID, db: Db, user: CurrentUser) -> None:
     attachment = db.get(Attachment, attachment_id)
     if attachment is None:
@@ -2483,7 +2485,7 @@ def update_goal(
     return {"id": str(goal.id), "status": goal.status}
 
 
-@router.delete("/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def delete_goal(goal_id: UUID, db: Db, user: CurrentUser) -> None:
     goal = db.scalar(
         select(Goal)
@@ -2733,7 +2735,7 @@ def list_prop_rule_versions(
     ]
 
 
-@router.delete("/prop-rules/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/prop-rules/{account_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 def delete_prop_rules(account_id: UUID, db: Db, user: CurrentUser) -> None:
     _account_or_404(db, user, account_id)
     profile = db.scalar(
