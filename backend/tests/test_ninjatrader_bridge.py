@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -15,12 +15,16 @@ from app.auth import get_current_user
 from app.database import Base, get_db
 from app.models import (
     AccountType,
+    CaptureEvent,
     BrokerConnection,
     BrokerExecutionEvent,
     Trade,
+    TradeJournal,
     TradingAccount,
     User,
 )
+from app.services.broker_ingestion import _fingerprint, _trip_allocation_rows, reconstruct_round_trips
+from tools.repair_ninjatrader_replay import _find_plan, _update_target
 
 
 def _client() -> tuple[TestClient, Session, User, TradingAccount]:
@@ -225,6 +229,349 @@ def test_partial_exit_round_trip_uses_weighted_exit_price() -> None:
     assert trade.entry_price == Decimal("100")
     assert trade.exit_price == Decimal("101.5")
     assert trade.gross_pnl == Decimal("6.0000")
+
+
+def test_eight_verified_mnq_fills_reconstruct_four_trades_and_exact_totals() -> None:
+    client, db, _, account = _client()
+    _, token = _create_connection_and_token(client, account)
+    headers = {"Authorization": f"Bearer {token}"}
+    trades = [
+        ("29251.50", "29302.50", "2", "2.00", "18:12"),
+        ("29190.00", "29170.75", "10", "10.00", "19:23"),
+        ("29158.75", "29157.25", "5", "5.00", "19:40"),
+        ("29139.75", "29126.00", "1", "1.00", "20:02"),
+    ]
+    fill_number = 0
+    for entry_price, exit_price, quantity, total_fee, clock in trades:
+        hour, minute = (int(value) for value in clock.split(":"))
+        entry_at = datetime(2026, 10, 25, hour, minute, tzinfo=timezone.utc)
+        for side, price, offset in [
+            ("sell", entry_price, 0),
+            ("buy", exit_price, 1),
+        ]:
+            fill_number += 1
+            response = client.post(
+                "/api/v1/broker-bridge/executions",
+                headers=headers,
+                json={
+                    "external_execution_id": f"VERIFIED-{fill_number}",
+                    "symbol": "MNQ 12-26",
+                    "side": side,
+                    "quantity": quantity,
+                    "price": price,
+                    "commission": str(Decimal(total_fee) / 2),
+                    "point_value": "2",
+                    "currency": "USD",
+                    "executed_at": (entry_at + timedelta(minutes=offset)).isoformat(),
+                },
+            )
+            assert response.status_code == 201, response.text
+
+    completed = list(db.scalars(select(Trade).where(Trade.account_id == account.id)).all())
+    assert len(completed) == 4
+    assert sum((trade.gross_pnl for trade in completed), Decimal("0")) == Decimal("223.5000")
+    assert sum((trade.fees for trade in completed), Decimal("0")) == Decimal("18.0000")
+    assert sum((trade.net_pnl for trade in completed), Decimal("0")) == Decimal("205.5000")
+    assert account.starting_balance + sum(
+        (trade.net_pnl for trade in completed), Decimal("0")
+    ) == Decimal("50205.5000")
+    assert {trade.reconciliation_status for trade in completed} == {
+        "live_stream_unverified"
+    }
+    assert all(
+        "no completeness watermark" in trade.source_payload["warnings"][0]
+        for trade in completed
+    )
+    assert sorted(trade.contract_quantity for trade in completed) == [
+        Decimal("1"), Decimal("2"), Decimal("5"), Decimal("10")
+    ]
+
+
+def test_replay_batch_buffers_observed_out_of_order_arrival_until_complete() -> None:
+    client, db, _, account = _client()
+    _, token = _create_connection_and_token(client, account)
+    headers = {"Authorization": f"Bearer {token}"}
+    ids = [f"REPLAY-{index}" for index in range(1, 9)]
+    batch = {
+        "source_namespace": "Lucid connection",
+        "source_account_name": account.external_account_id,
+        "batch_id": "47355e2e-6651-4e7f-9bda-45879c6bb18f",
+        "expected_execution_ids": ids,
+    }
+    started = client.post(
+        "/api/v1/broker-bridge/execution-batches/start", json=batch, headers=headers
+    )
+    assert started.status_code == 200, started.text
+
+    # This is the production receive order for the first four fills.
+    fills = [
+        ("buy", "10", "29170.75", "2026-10-25T19:26:57.766-04:00"),
+        ("sell", "2", "29251.50", "2026-10-25T18:12:38.351-04:00"),
+        ("buy", "2", "29302.50", "2026-10-25T18:31:18.337-04:00"),
+        ("sell", "10", "29190.00", "2026-10-25T19:23:36.919-04:00"),
+        ("sell", "5", "29158.75", "2026-10-25T19:40:00.000-04:00"),
+        ("buy", "5", "29157.25", "2026-10-25T19:41:00.000-04:00"),
+        ("sell", "1", "29139.75", "2026-10-25T20:02:00.000-04:00"),
+        ("buy", "1", "29126.00", "2026-10-25T20:03:00.000-04:00"),
+    ]
+    for index, (side, quantity, price, executed_at) in enumerate(fills):
+        response = client.post(
+            "/api/v1/broker-bridge/executions",
+            headers=headers,
+            json={
+                "source_namespace": batch["source_namespace"],
+                "source_account_name": batch["source_account_name"],
+                "external_execution_id": ids[index],
+                "symbol": "MNQ 12-26",
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+                "point_value": "2",
+                "executed_at": executed_at,
+            },
+        )
+        assert response.status_code == 201, response.text
+        if index == 1:
+            assert response.json()["trade_ids"] == []
+            assert db.scalars(select(Trade).where(Trade.account_id == account.id)).all() == []
+    assert db.scalars(select(Trade).where(Trade.account_id == account.id)).all() == []
+
+    completed = client.post(
+        "/api/v1/broker-bridge/execution-batches/complete",
+        json=batch,
+        headers=headers,
+    )
+    assert completed.status_code == 200, completed.text
+    trades = list(db.scalars(
+        select(Trade).where(Trade.account_id == account.id)
+        .order_by(Trade.entry_timestamp)
+    ).all())
+    assert len(trades) == 4
+    assert [trade.gross_pnl for trade in trades] == [
+        Decimal("-204"), Decimal("385"), Decimal("15"), Decimal("27.5")
+    ]
+    assert [(trade.entry_price, trade.exit_price) for trade in trades] == [
+        (Decimal("29251.50"), Decimal("29302.50")),
+        (Decimal("29190.00"), Decimal("29170.75")),
+        (Decimal("29158.75"), Decimal("29157.25")),
+        (Decimal("29139.75"), Decimal("29126.00")),
+    ]
+
+    # Exact batch retries are idempotent and preserve the four materialized rows.
+    assert client.post(
+        "/api/v1/broker-bridge/execution-batches/start", json=batch, headers=headers
+    ).status_code == 200
+    retried = client.post(
+        "/api/v1/broker-bridge/execution-batches/complete",
+        json=batch,
+        headers=headers,
+    )
+    assert retried.status_code == 200, retried.text
+    assert db.scalars(select(Trade).where(Trade.account_id == account.id)).all() == trades
+
+
+def test_unbatched_late_fill_is_quarantined_and_does_not_rewrite_saved_trade() -> None:
+    client, db, _, account = _client()
+    _, token = _create_connection_and_token(client, account)
+    headers = {"Authorization": f"Bearer {token}"}
+
+    def send(execution_id: str, side: str, quantity: str, price: str, at: str):
+        return client.post(
+            "/api/v1/broker-bridge/executions",
+            headers=headers,
+            json={
+                "external_execution_id": execution_id,
+                "symbol": "MNQ 12-26",
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+                "point_value": "2",
+                "executed_at": at,
+            },
+        )
+
+    assert send(
+        "LATE-ENTRY", "sell", "2", "29251.50", "2026-10-25T22:12:38Z"
+    ).status_code == 201
+    second = send(
+        "LATE-EXIT", "buy", "2", "29170.75", "2026-10-25T23:26:57Z"
+    )
+    assert second.status_code == 201, second.text
+    trade = db.scalar(select(Trade).where(Trade.account_id == account.id))
+    assert trade is not None
+    original_id = trade.id
+    original_pnl = trade.gross_pnl
+    assert original_pnl == Decimal("323.0000")
+
+    late = send(
+        "LATE-MISSING-CLOSE", "buy", "2", "29302.50", "2026-10-25T22:31:18Z"
+    )
+    assert late.status_code == 201, late.text
+    late_event = db.scalar(
+        select(BrokerExecutionEvent).where(
+            BrokerExecutionEvent.external_execution_id == "LATE-MISSING-CLOSE"
+        )
+    )
+    assert late_event is not None
+    assert late_event.ingest_status == "needs_reconciliation"
+    db.refresh(trade)
+    assert trade.id == original_id
+    assert trade.gross_pnl == original_pnl
+    assert trade.reconciliation_status == "needs_reconciliation"
+
+
+def test_targeted_repair_preserves_trade_id_journal_and_capture() -> None:
+    client, db, user, account = _client()
+    connection_data, _ = _create_connection_and_token(client, account)
+    connection = db.get(BrokerConnection, UUID(connection_data["id"]))
+    assert connection is not None
+    fills = [
+        ("buy", "10", "29170.75", "2026-10-25T19:26:57+00:00"),
+        ("sell", "2", "29251.50", "2026-10-25T18:12:38+00:00"),
+        ("buy", "2", "29302.50", "2026-10-25T18:31:18+00:00"),
+        ("sell", "10", "29190.00", "2026-10-25T19:23:36+00:00"),
+        ("sell", "5", "29158.75", "2026-10-25T19:40:00+00:00"),
+        ("buy", "5", "29157.25", "2026-10-25T19:41:00+00:00"),
+        ("sell", "1", "29139.75", "2026-10-25T20:02:00+00:00"),
+        ("buy", "1", "29126.00", "2026-10-25T20:03:00+00:00"),
+    ]
+    events = [
+        BrokerExecutionEvent(
+            user_id=user.id,
+            account_id=account.id,
+            connection_id=connection.id,
+            provider="ninjatrader",
+            external_execution_id=f"REPAIR-{index}",
+            symbol="MNQ 12-26",
+            side=side,
+            quantity=Decimal(quantity),
+            price=Decimal(price),
+            commission=None,
+            point_value=Decimal("2"),
+            currency="USD",
+            executed_at=datetime.fromisoformat(timestamp),
+            ingest_status="needs_reconciliation",
+            source_payload={"ninjatrader_account": account.external_account_id},
+        )
+        for index, (side, quantity, price, timestamp) in enumerate(fills, start=1)
+    ]
+    db.add_all(events)
+    db.flush()
+    ids = {event.external_execution_id for event in events}
+    wrong_trip = reconstruct_round_trips(events[:2])[0]
+
+    def saved_trade(trip, *, fingerprint: str | None = None) -> Trade:
+        event_ids = sorted({item.event.external_execution_id for item in trip.slices})
+        buy_ids = sorted({item.event.external_execution_id for item in trip.slices if item.event.side == "buy"})
+        sell_ids = sorted({item.event.external_execution_id for item in trip.slices if item.event.side == "sell"})
+        return Trade(
+            account_id=account.id,
+            duplicate_fingerprint=fingerprint or _fingerprint(connection, trip),
+            symbol=trip.symbol,
+            root_symbol="MNQ",
+            contract_quantity=trip.quantity,
+            side=trip.side,
+            entry_price=trip.entry_price,
+            exit_price=trip.exit_price,
+            gross_pnl=trip.gross_pnl,
+            fees=None,
+            net_pnl=trip.gross_pnl,
+            entry_timestamp=trip.entry_timestamp,
+            exit_timestamp=trip.exit_timestamp,
+            duration_seconds=0,
+            source_quality="broker_live",
+            reconciliation_status="needs_reconciliation",
+            source_payload={
+                "connection_id": str(connection.id),
+                "execution_ids": event_ids,
+                "execution_allocations": _trip_allocation_rows(trip),
+            },
+            external_buy_fill_id=",".join(buy_ids),
+            external_sell_fill_id=",".join(sell_ids),
+        )
+
+    target = saved_trade(wrong_trip, fingerprint="bad-fingerprint-target")
+    correct_trip3 = reconstruct_round_trips(events[4:6])[0]
+    correct_trip4 = reconstruct_round_trips(events[6:8])[0]
+    existing3 = saved_trade(correct_trip3)
+    existing4 = saved_trade(correct_trip4)
+    db.add_all([target, existing3, existing4])
+    db.flush()
+    db.add(TradeJournal(trade_id=target.id, thesis="Keep this journal content"))
+    capture = CaptureEvent(
+        user_id=user.id,
+        account_id=account.id,
+        captured_at=datetime(2026, 10, 25, 18, 15, tzinfo=timezone.utc),
+        event_type="note",
+        note="Keep this capture",
+        match_status="matched",
+        matched_trade_id=target.id,
+    )
+    db.add(capture)
+    db.flush()
+
+    plan = _find_plan(
+        db,
+        account.id,
+        ids,
+        str(target.id).replace("-", "")[-8:],
+        {},
+    )
+    assert len(plan["after"]) == 4
+    assert plan["after"][0]["trade_id"] == str(target.id)
+    assert Decimal(plan["after"][0]["gross_pnl"]) == Decimal("-204")
+    assert plan["after"][1]["action"] == "create"
+    assert "trade_journals" in plan["relationships"]
+    assert "capture_events" in plan["relationships"]
+
+    _update_target(db, plan, {}, None)
+    repaired = db.get(Trade, target.id)
+    assert repaired is not None
+    assert repaired.gross_pnl == Decimal("-204.0000")
+    assert repaired.duplicate_fingerprint == _fingerprint(connection, reconstruct_round_trips(events)[0])
+    assert db.get(TradeJournal, target.id).thesis == "Keep this journal content"
+    db.refresh(capture)
+    assert capture.matched_trade_id == target.id
+    assert len(db.scalars(select(Trade).where(Trade.account_id == account.id)).all()) == 4
+
+
+def test_read_only_reconciliation_diagnostic_redacts_execution_ids_and_is_account_scoped() -> None:
+    client, _, user, account = _client()
+    _, token = _create_connection_and_token(client, account)
+    response = client.post(
+        "/api/v1/broker-bridge/executions",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "external_execution_id": "PRIVATE-EXECUTION-123",
+            "symbol": "MNQ 12-26",
+            "side": "sell",
+            "quantity": "1",
+            "price": "100",
+            "point_value": "2",
+            "executed_at": "2026-10-25T18:12:00+00:00",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+    diagnostic = client.get(
+        "/api/v1/broker-reconciliation-diagnostic",
+        params={"account_id": str(account.id)},
+    )
+    assert diagnostic.status_code == 200, diagnostic.text
+    body = diagnostic.json()
+    assert body["read_only"] is True
+    assert body["coverage_assessment"] == "unknown_without_broker_history_replay"
+    assert body["execution_count"] == 1
+    assert body["executions"][0]["execution_ref"] != "PRIVATE-EXECUTION-123"
+    assert "PRIVATE-EXECUTION-123" not in diagnostic.text
+
+    other_user = User(email="diagnostic-other@journalme.local", display_name="Other")
+    client.app.dependency_overrides[get_current_user] = lambda: other_user
+    forbidden = client.get(
+        "/api/v1/broker-reconciliation-diagnostic",
+        params={"account_id": str(account.id)},
+    )
+    assert forbidden.status_code == 404
 
 
 def test_installation_requires_explicit_mapping_and_scopes_same_execution_ids() -> None:

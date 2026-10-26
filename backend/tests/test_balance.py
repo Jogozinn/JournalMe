@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -9,6 +9,7 @@ from app.database import Base
 from app.domain import TradeSide
 from app.models import (
     Attachment,
+    BrokerConnection,
     CashTransaction,
     DailyBalance,
     ManualAdjustment,
@@ -229,6 +230,81 @@ def test_only_first_opening_funding_suppressed_not_later_matching_deposit() -> N
     result = resolve_account_balance(db, account)
     assert result.external_cash_movements == Decimal("50000")
     assert result.calculated_balance == Decimal("100000")
+    db.close()
+
+
+def test_fresh_authorized_broker_snapshot_is_reported_separately_and_selected() -> None:
+    db, account = _db()
+    account.external_account_id = "funded-1"
+    connection = BrokerConnection(
+        user_id=account.user_id,
+        account_id=account.id,
+        provider="ninjatrader",
+        connection_type="desktop_bridge",
+        display_name="Funded bridge source",
+        source_account_name="funded-1",
+        metadata_json={
+            "account_snapshot": {
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "cash_value": "50205.50",
+                "net_liquidation": "50204.75",
+            }
+        },
+    )
+    db.add(connection)
+    db.add(_trade(account, "205.50", datetime.now(timezone.utc)))
+    db.flush()
+
+    result = resolve_account_balance(db, account)
+
+    assert result.resolved_current_balance == Decimal("50205.50")
+    assert result.calculated_balance == Decimal("50205.50")
+    assert result.broker_reported_cash_value == Decimal("50205.50")
+    assert result.broker_reported_net_liquidation == Decimal("50204.75")
+    assert result.broker_snapshot_fresh is True
+    assert result.resolution_method == "broker_reported_snapshot"
+    assert result.reconciliation_difference == Decimal("0.00")
+    db.close()
+
+
+def test_stale_or_other_accounts_broker_snapshots_are_not_authoritative() -> None:
+    db, account = _db()
+    foreign_account = _account(db)
+    db.add(BrokerConnection(
+        user_id=foreign_account.user_id,
+        account_id=foreign_account.id,
+        provider="ninjatrader",
+        connection_type="desktop_bridge",
+        display_name="Other account bridge source",
+        metadata_json={
+            "account_snapshot": {
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "cash_value": "99999",
+            }
+        },
+    ))
+    db.add(BrokerConnection(
+        user_id=account.user_id,
+        account_id=account.id,
+        provider="ninjatrader",
+        connection_type="desktop_bridge",
+        display_name="Stale bridge source",
+        metadata_json={
+            "account_snapshot": {
+                "captured_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat(),
+                "cash_value": "50100",
+            }
+        },
+    ))
+    db.add(_trade(account, "100", datetime.now(timezone.utc)))
+    db.flush()
+
+    result = resolve_account_balance(db, account)
+
+    assert result.resolved_current_balance == Decimal("50100")
+    assert result.resolution_method == "calculated_from_ledger"
+    assert result.broker_reported_cash_value == Decimal("50100")
+    assert result.broker_snapshot_fresh is False
     db.close()
 
 

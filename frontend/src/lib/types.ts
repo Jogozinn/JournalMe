@@ -30,6 +30,11 @@ export type Account = {
     resolution_method: string;
     reconciliation_difference: string | null;
     stale_snapshot: boolean;
+    broker_reported_cash_value?: string | null;
+    broker_reported_net_liquidation?: string | null;
+    broker_snapshot_as_of?: string | null;
+    broker_snapshot_source_account?: string | null;
+    broker_snapshot_fresh?: boolean;
   };
 };
 

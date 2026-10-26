@@ -26,6 +26,11 @@ type Dashboard = {
     imported_balance: string | null;
     calculated_balance: string | null;
     reconciliation_difference: string | null;
+    broker_reported_cash_value: string | null;
+    broker_reported_net_liquidation: string | null;
+    broker_snapshot_as_of: string | null;
+    broker_snapshot_source_account: string | null;
+    broker_snapshot_fresh: boolean;
   };
   metrics: Metrics;
   equity_curve: { at: string; value: string }[];
@@ -281,7 +286,32 @@ export default function HomePage() {
                   ? `Imported balance · ${data.balance_as_of}`
                   : data.balance_resolution.resolution_method === "stale_snapshot_roll_forward"
                     ? `Snapshot rolled forward · ${data.balance_as_of}`
+                    : data.balance_resolution.resolution_method === "broker_reported_snapshot"
+                      ? `NinjaTrader ${data.balance_resolution.broker_reported_cash_value !== null ? "Cash Value" : "Net Liquidation"} · ${data.balance_resolution.broker_snapshot_as_of ? dateTime(data.balance_resolution.broker_snapshot_as_of) : "timestamp unavailable"}`
                     : "Calculated from the canonical ledger"}
+              </small>
+              {(data.balance_resolution.broker_reported_cash_value !== null ||
+                data.balance_resolution.broker_reported_net_liquidation !== null) && (
+                <small>
+                  Broker reported {money(
+                    data.balance_resolution.broker_reported_cash_value ??
+                      data.balance_resolution.broker_reported_net_liquidation
+                  )}
+                  {data.balance_resolution.broker_snapshot_fresh ? " · fresh" : " · stale"}
+                  {data.balance_resolution.broker_snapshot_source_account
+                    ? ` · ${data.balance_resolution.broker_snapshot_source_account}`
+                    : ""}
+                </small>
+              )}
+              {data.balance_resolution.broker_snapshot_fresh &&
+                data.balance_resolution.reconciliation_difference !== null &&
+                Number(data.balance_resolution.reconciliation_difference) !== 0 && (
+                  <small className="warning-text">
+                    Broker and journal balance difference: {money(data.balance_resolution.reconciliation_difference)}
+                  </small>
+                )}
+              <small>
+                Journal calculated balance: {money(data.balance_resolution.calculated_balance)}
               </small>
             </article>
             {metricLabels.slice(0, 3).map(([key, label, format]) => {

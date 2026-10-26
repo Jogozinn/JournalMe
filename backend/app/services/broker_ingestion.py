@@ -273,17 +273,24 @@ def materialize_closed_trades(
     connection: BrokerConnection,
     *,
     symbol: str | None = None,
+    execution_ids: set[str] | None = None,
 ) -> list[Trade]:
     if connection.account_id is None:
         return []
     account = db.get(TradingAccount, connection.account_id)
     if account is None:
         return []
+    if (connection.metadata_json or {}).get("active_execution_batch"):
+        # Do not interpret an interim position-flat observation as a completed
+        # trade while an account-scoped NinjaTrader replay is still uploading.
+        return []
     statement = select(BrokerExecutionEvent).where(
         BrokerExecutionEvent.connection_id == connection.id,
         BrokerExecutionEvent.account_id == connection.account_id,
     )
     events = list(db.scalars(statement.order_by(BrokerExecutionEvent.executed_at, BrokerExecutionEvent.created_at)).all())
+    if execution_ids is not None:
+        events = [event for event in events if event.external_execution_id in execution_ids]
     if symbol:
         requested_contract = canonical_contract_key(symbol)
         events = [
@@ -334,7 +341,14 @@ def materialize_closed_trades(
                 continue
             buy_ids = sorted({item.event.external_execution_id for item in trip.slices if _side_sign(item.event.side) > 0})
             sell_ids = sorted({item.event.external_execution_id for item in trip.slices if _side_sign(item.event.side) < 0})
-            warnings = [] if trip.fees is not None else ["Commission/fees were unavailable from the live broker event and remain unreconciled."]
+            warnings = [
+                "The live execution stream has no completeness watermark; reconcile broker fills "
+                "before treating this trade boundary as final."
+            ]
+            if trip.fees is None:
+                warnings.append(
+                    "Commission/fees were unavailable from the live broker event and remain unreconciled."
+                )
             trade = Trade(
                 account_id=connection.account_id,
                 primary_import_session_id=None,
@@ -360,7 +374,11 @@ def materialize_closed_trades(
                 duration_seconds=max(0, int((trip.exit_timestamp - trip.entry_timestamp).total_seconds())),
                 tick_size=None,
                 source_quality="broker_live",
-                reconciliation_status="reconciled" if trip.fees is not None else "live_fees_pending",
+                reconciliation_status=(
+                    "live_fees_pending"
+                    if trip.fees is None
+                    else "live_stream_unverified"
+                ),
                 source_payload={
                     "source": "broker_live",
                     "provider": connection.provider,

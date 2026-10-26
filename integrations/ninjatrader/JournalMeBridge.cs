@@ -21,13 +21,14 @@ namespace NinjaTrader.NinjaScript.AddOns
 {
     public class JournalMeBridge : AddOnBase
     {
-        private const string BridgeVersion = "0.8.0";
+        private const string BridgeVersion = "0.9.0";
         private readonly HashSet<Account> subscribedAccounts = new HashSet<Account>();
         private readonly object subscriptionsLock = new object();
         private readonly Dictionary<Account, string> sourceNamespaces = new Dictionary<Account, string>();
         private readonly object queueLock = new object();
         private readonly object snapshotLock = new object();
         private readonly Dictionary<string, DateTime> retryAfterUtc = new Dictionary<string, DateTime>();
+        private readonly Dictionary<string, PendingReplayBatch> pendingReplayBatches = new Dictionary<string, PendingReplayBatch>();
         private string lastFailureCode;
         private DateTime lastFailureUtc = DateTime.MinValue;
         private readonly Dictionary<Account, DateTime> lastSnapshotSentUtc = new Dictionary<Account, DateTime>();
@@ -109,16 +110,37 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         private void ReplayCurrentSession(Account account)
         {
-            if (SourceNamespace(account) == null)
+            string sourceNamespace = SourceNamespace(account);
+            if (sourceNamespace == null)
                 return;
             // The documented collection contains only current-session executions.
             try
             {
+                Execution[] executions;
                 lock (account.Executions)
+                    executions = account.Executions.ToArray();
+
+                string sourceKey = config.InstallationId + "|" + sourceNamespace + "|" + account.Name;
+                string batchId = Guid.NewGuid().ToString("D");
+                string[] expectedIds = executions
+                    .Where(execution => execution != null && NormalizeSide(execution) != null)
+                    .Select(ExternalExecutionId)
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+                string batchJson = ExecutionBatchJson(sourceNamespace, account.Name, batchId, expectedIds);
+                bool retryable;
+                string error;
+                if (!PostJson("/broker-bridge/execution-batches/start", batchJson, out retryable, out error))
                 {
-                    foreach (Execution execution in account.Executions.ToArray())
-                        ProcessExecution(execution, execution.Quantity, execution.Price);
+                    Write("SESSION_REPLAY_HELD|account=" + account.Name + "|batch_start=" + error);
+                    return;
                 }
+                lock (queueLock)
+                    pendingReplayBatches[sourceKey] = new PendingReplayBatch(
+                        batchId, batchJson, expectedIds);
+                foreach (Execution execution in executions)
+                    ProcessExecution(execution, execution.Quantity, execution.Price);
+                FlushQueue();
             }
             catch (Exception ex) { Write("SESSION_REPLAY_ERROR|" + ex.GetType().Name); }
         }
@@ -154,9 +176,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 return;
             }
 
-            string executionId = execution.ExecutionId;
-            if (string.IsNullOrWhiteSpace(executionId))
-                executionId = "nt-" + execution.OrderId + "-" + execution.Time.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture);
+            string executionId = ExternalExecutionId(execution);
 
             decimal commission = Convert.ToDecimal(execution.Commission, CultureInfo.InvariantCulture);
             double pointValue = 0;
@@ -398,75 +418,142 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             lock (queueLock)
             {
-                if (!File.Exists(BridgeConfig.QueuePath))
-                    return;
-                string[] lines = File.ReadAllLines(BridgeConfig.QueuePath);
-                if (lines.Length == 0)
-                    return;
-                List<string> remaining = new List<string>();
-                int sent = 0;
-                for (int index = 0; index < lines.Length; index++)
+                string[] lines = File.Exists(BridgeConfig.QueuePath)
+                    ? File.ReadAllLines(BridgeConfig.QueuePath)
+                    : new string[0];
+                if (lines.Length > 0)
                 {
-                    string line = lines[index];
-                    if (string.IsNullOrWhiteSpace(line))
-                        continue;
-                    string json;
-                    string sourceKey;
-                    try
+                    List<string> remaining = new List<string>();
+                    int sent = 0;
+                    for (int index = 0; index < lines.Length; index++)
                     {
-                        string[] parts = line.Trim().Split(new char[] { '.' }, 2);
-                        sourceKey = Encoding.UTF8.GetString(Convert.FromBase64String(parts[0]));
-                        json = Encoding.UTF8.GetString(Convert.FromBase64String(parts[1]));
+                        string line = lines[index];
+                        if (string.IsNullOrWhiteSpace(line))
+                            continue;
+                        string json;
+                        string sourceKey;
+                        try
+                        {
+                            string[] parts = line.Trim().Split(new char[] { '.' }, 2);
+                            sourceKey = Encoding.UTF8.GetString(Convert.FromBase64String(parts[0]));
+                            json = Encoding.UTF8.GetString(Convert.FromBase64String(parts[1]));
+                        }
+                        catch
+                        {
+                            remaining.Add(line);
+                            continue;
+                        }
+                        if (!sourceKey.StartsWith(config.InstallationId + "|", StringComparison.Ordinal))
+                        {
+                            // A queue from another installation must not be reattributed.
+                            remaining.Add(line);
+                            continue;
+                        }
+                        DateTime retryAfter;
+                        if (retryAfterUtc.TryGetValue(sourceKey, out retryAfter) && DateTime.UtcNow < retryAfter)
+                        {
+                            remaining.Add(line);
+                            continue;
+                        }
+                        bool retryable;
+                        string error;
+                        if (PostJson("/broker-bridge/executions", json, out retryable, out error))
+                        {
+                            sent++;
+                            retryAfterUtc.Remove(sourceKey);
+                        }
+                        else
+                        {
+                            remaining.Add(line);
+                            lastFailureCode = error;
+                            lastFailureUtc = DateTime.UtcNow;
+                            retryAfterUtc[sourceKey] = DateTime.UtcNow.AddSeconds(retryable ? 30 : 60);
+                            // A rejected account does not block other authorized accounts.
+                        }
+                        if (index >= 24)
+                        {
+                            remaining.AddRange(lines.Skip(index + 1).Where(value => !string.IsNullOrWhiteSpace(value)));
+                            break;
+                        }
                     }
-                    catch
-                    {
-                        remaining.Add(line);
-                        continue;
-                    }
-                    if (!sourceKey.StartsWith(config.InstallationId + "|", StringComparison.Ordinal))
-                    {
-                        // A queue from another installation must not be reattributed.
-                        remaining.Add(line);
-                        continue;
-                    }
-                    DateTime retryAfter;
-                    if (retryAfterUtc.TryGetValue(sourceKey, out retryAfter) && DateTime.UtcNow < retryAfter)
-                    {
-                        remaining.Add(line);
-                        continue;
-                    }
-                    bool retryable;
-                    string error;
-                    if (PostJson("/broker-bridge/executions", json, out retryable, out error))
-                    {
-                        sent++;
-                        retryAfterUtc.Remove(sourceKey);
-                    }
+                    if (remaining.Count == 0)
+                        File.Delete(BridgeConfig.QueuePath);
                     else
                     {
-                        remaining.Add(line);
-                        lastFailureCode = error;
-                        lastFailureUtc = DateTime.UtcNow;
-                        retryAfterUtc[sourceKey] = DateTime.UtcNow.AddSeconds(retryable ? 30 : 60);
-                        // A rejected account does not block other authorized accounts.
+                        string temporary = BridgeConfig.QueuePath + ".tmp";
+                        File.WriteAllLines(temporary, remaining.ToArray());
+                        File.Replace(temporary, BridgeConfig.QueuePath, null);
                     }
-                    if (index >= 24)
-                    {
-                        remaining.AddRange(lines.Skip(index + 1).Where(value => !string.IsNullOrWhiteSpace(value)));
-                        break;
-                    }
+                    if (sent > 0)
+                        Write("QUEUE_FLUSHED|count=" + sent.ToString(CultureInfo.InvariantCulture));
                 }
-                if (remaining.Count == 0)
-                    File.Delete(BridgeConfig.QueuePath);
-                else
-                {
-                    string temporary = BridgeConfig.QueuePath + ".tmp";
-                    File.WriteAllLines(temporary, remaining.ToArray());
-                    File.Replace(temporary, BridgeConfig.QueuePath, null);
-                }
-                if (sent > 0)
-                    Write("QUEUE_FLUSHED|count=" + sent.ToString(CultureInfo.InvariantCulture));
             }
+            TryCompleteReplayBatches();
+        }
+
+        private void TryCompleteReplayBatches()
+        {
+            KeyValuePair<string, PendingReplayBatch>[] batches;
+            lock (queueLock)
+                batches = pendingReplayBatches.ToArray();
+            foreach (KeyValuePair<string, PendingReplayBatch> item in batches)
+            {
+                if (HasQueuedSourceItems(item.Key))
+                    continue;
+                bool retryable;
+                string error;
+                if (!PostJson("/broker-bridge/execution-batches/complete", item.Value.Json,
+                    out retryable, out error))
+                    continue; // The server reports exactly which expected fills are still absent.
+                lock (queueLock)
+                {
+                    PendingReplayBatch current;
+                    if (pendingReplayBatches.TryGetValue(item.Key, out current) &&
+                        current.BatchId == item.Value.BatchId)
+                        pendingReplayBatches.Remove(item.Key);
+                }
+                Write("SESSION_REPLAY_COMPLETE|batch=" + item.Value.BatchId +
+                    "|fills=" + item.Value.ExpectedExecutionIds.Length.ToString(CultureInfo.InvariantCulture));
+            }
+        }
+
+        private bool HasQueuedSourceItems(string sourceKey)
+        {
+            lock (queueLock)
+            {
+                if (!File.Exists(BridgeConfig.QueuePath))
+                    return false;
+                foreach (string line in File.ReadAllLines(BridgeConfig.QueuePath))
+                {
+                    try
+                    {
+                        string encodedKey = line.Trim().Split(new char[] { '.' }, 2)[0];
+                        string queuedKey = Encoding.UTF8.GetString(Convert.FromBase64String(encodedKey));
+                        if (string.Equals(queuedKey, sourceKey, StringComparison.Ordinal))
+                            return true;
+                    }
+                    catch { return true; }
+                }
+                return false;
+            }
+        }
+
+        private string ExecutionBatchJson(string sourceNamespace, string accountName,
+            string batchId, string[] expectedExecutionIds)
+        {
+            return "{" + JsonPair("source_namespace", sourceNamespace) + "," +
+                JsonPair("source_account_name", accountName) + "," +
+                JsonPair("batch_id", batchId) + "," +
+                "\"expected_execution_ids\":" + JsonArray(expectedExecutionIds) + "}";
+        }
+
+        private static string ExternalExecutionId(Execution execution)
+        {
+            string executionId = execution.ExecutionId;
+            if (string.IsNullOrWhiteSpace(executionId))
+                executionId = "nt-" + execution.OrderId + "-" +
+                    execution.Time.ToUniversalTime().Ticks.ToString(CultureInfo.InvariantCulture);
+            return executionId;
         }
 
         private void FlushLegacyQueue()
@@ -534,6 +621,11 @@ namespace NinjaTrader.NinjaScript.AddOns
             return "\"" + JsonEscape(key) + "\":\"" + JsonEscape(value ?? "") + "\"";
         }
 
+        private static string JsonArray(IEnumerable<string> values)
+        {
+            return "[" + string.Join(",", values.Select(value => "\"" + JsonEscape(value) + "\"")) + "]";
+        }
+
         private static string JsonNumber(string key, decimal value)
         {
             return "\"" + JsonEscape(key) + "\":" + value.ToString(CultureInfo.InvariantCulture);
@@ -581,6 +673,20 @@ namespace NinjaTrader.NinjaScript.AddOns
         private static void Write(string message)
         {
             NinjaTrader.Code.Output.Process("JournalMeBridge|" + message, PrintTo.OutputTab1);
+        }
+
+        private sealed class PendingReplayBatch
+        {
+            public string Json { get; private set; }
+            public string BatchId { get; private set; }
+            public string[] ExpectedExecutionIds { get; private set; }
+
+            public PendingReplayBatch(string batchId, string json, string[] expectedExecutionIds)
+            {
+                BatchId = batchId;
+                Json = json;
+                ExpectedExecutionIds = expectedExecutionIds;
+            }
         }
 
         private sealed class BridgeConfig

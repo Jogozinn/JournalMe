@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import (
+    BrokerConnection,
     CashTransaction,
     DailyBalance,
     ManualAdjustment,
@@ -73,6 +74,11 @@ class BalanceResolution:
     approved_manual_adjustments: Decimal
     external_cash_movements: Decimal
     approved_payout_deductions: Decimal
+    broker_reported_cash_value: Decimal | None
+    broker_reported_net_liquidation: Decimal | None
+    broker_snapshot_as_of: datetime | None
+    broker_snapshot_source_account: str | None
+    broker_snapshot_fresh: bool
 
     def as_dict(self) -> dict[str, Any]:
         values = asdict(self)
@@ -203,6 +209,7 @@ def resolve_account_balances(
             .order_by(DailyBalance.account_id, DailyBalance.trade_date)
         ).all()
     )
+    broker_snapshots = _latest_broker_snapshots(db, account_ids)
     trade_dates = fill_trade_date_map(
         db, [item.id for values in trades.values() for item in values]
     )
@@ -215,6 +222,7 @@ def resolve_account_balances(
             payouts.get(account.id, []),
             snapshots.get(account.id, []),
             trade_dates,
+            broker_snapshots.get(account.id),
         )
         for account in accounts
     }
@@ -235,6 +243,7 @@ def _calculate_balance(
     payouts: list[PropPayoutRecord],
     snapshots: list[DailyBalance],
     trade_dates: dict[UUID, date],
+    broker_snapshot: dict[str, Any] | None,
 ) -> BalanceResolution:
     zone = ZoneInfo(account.timezone)
     snapshots = latest_balance_revisions(snapshots)
@@ -368,6 +377,18 @@ def _calculate_balance(
         if imported is not None and calculated is not None
         else None
     )
+    broker_fresh = bool(broker_snapshot and broker_snapshot["fresh"])
+    broker_value = None
+    if broker_fresh:
+        broker_value = (
+            broker_snapshot["cash_value"]
+            if broker_snapshot["cash_value"] is not None
+            else broker_snapshot["net_liquidation"]
+        )
+        if broker_value is not None:
+            resolved = broker_value
+            method = "broker_reported_snapshot"
+            difference = broker_value - calculated if calculated is not None else None
     return BalanceResolution(
         starting_balance=account.starting_balance,
         imported_balance=imported,
@@ -382,4 +403,65 @@ def _calculate_balance(
         approved_manual_adjustments=adjustment_net,
         external_cash_movements=cash_net,
         approved_payout_deductions=payout_deductions,
+        broker_reported_cash_value=(
+            broker_snapshot["cash_value"] if broker_snapshot else None
+        ),
+        broker_reported_net_liquidation=(
+            broker_snapshot["net_liquidation"] if broker_snapshot else None
+        ),
+        broker_snapshot_as_of=broker_snapshot["captured_at"] if broker_snapshot else None,
+        broker_snapshot_source_account=(
+            broker_snapshot["source_account_name"] if broker_snapshot else None
+        ),
+        broker_snapshot_fresh=broker_fresh,
     )
+
+
+def _latest_broker_snapshots(
+    db: Session,
+    account_ids: list[UUID],
+) -> dict[UUID, dict[str, Any]]:
+    if not account_ids:
+        return {}
+    connections = db.scalars(
+        select(BrokerConnection).where(
+            BrokerConnection.account_id.in_(account_ids),
+            BrokerConnection.provider == "ninjatrader",
+            BrokerConnection.connection_type == "desktop_bridge",
+            BrokerConnection.status != "removed",
+        )
+    ).all()
+    latest: dict[UUID, dict[str, Any]] = {}
+    now = datetime.now(timezone.utc)
+    for connection in connections:
+        account_id = connection.account_id
+        snapshot = (connection.metadata_json or {}).get("account_snapshot") or {}
+        captured_text = snapshot.get("captured_at")
+        if not account_id or not captured_text:
+            continue
+        try:
+            captured_at = datetime.fromisoformat(str(captured_text).replace("Z", "+00:00"))
+            captured_at = _utc(captured_at)
+        except (TypeError, ValueError):
+            continue
+        age = now - captured_at
+        fresh = timedelta(0) <= age <= timedelta(minutes=5)
+        candidate = {
+            "captured_at": captured_at,
+            "cash_value": (
+                Decimal(str(snapshot["cash_value"]))
+                if snapshot.get("cash_value") is not None
+                else None
+            ),
+            "net_liquidation": (
+                Decimal(str(snapshot["net_liquidation"]))
+                if snapshot.get("net_liquidation") is not None
+                else None
+            ),
+            "source_account_name": connection.source_account_name,
+            "fresh": fresh,
+        }
+        previous = latest.get(account_id)
+        if previous is None or candidate["captured_at"] > previous["captured_at"]:
+            latest[account_id] = candidate
+    return latest

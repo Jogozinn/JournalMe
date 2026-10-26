@@ -1,4 +1,4 @@
-# JournalMe NinjaTrader Bridge v0.8.0
+# JournalMe NinjaTrader Bridge v0.9.0
 
 The AddOn observes accounts, executions and balance snapshots. It sends data from NinjaTrader to JournalMe only. It has no order placement, modification, cancellation or flattening code.
 
@@ -22,4 +22,22 @@ The bridge journals a fill locally before upload. It retries across restarts, us
 
 At startup the AddOn checks `Account.Executions` for **current-session** fills. [NinjaTrader says this collection is current-session only and does not expose historical local executions through a supported API](https://ninjatrader.com/fr/support/helpguides/nt8/executions.htm). It cannot guarantee recovery of fills made while the PC was off. No Lucid historical API entitlement or stable history IDs have been verified, so automatic PC-off backfill is not connected.
 
+Version 0.9 buffers each account's startup replay behind a server-side batch. The AddOn sends the stable execution IDs it observed, uploads the fills through the retry queue, waits for that account's queued uploads to drain, and then completes the batch. The server verifies every expected ID is persisted before sorting by execution time and reconstructing trades. Batch state is per authorized source account; a failed or interrupted batch remains held until a later replay completes it. A late execution outside an active batch is retained with `needs_reconciliation` and does not rewrite a saved trade.
+
 To recover a gap, identify the affected account and dates from the last JournalMe fill/heartbeat, then obtain a broker statement or prior-session report for that account. [NinjaTrader's Control Center Executions tab covers the current day only](https://ninjatrader.com/support/helpGuides/nt8/executions_tab.htm); for previous sessions, use [Trade Performance or a provider statement](https://support.ninjatrader.com/s/article/How-Can-I-Learn-More-About-NinjaTrader-Desktop-Control-Center?language=en_US). The existing JournalMe importer supports Tradovate-style report files through **Imports → New import**. Check its preview warnings and coverage before committing. A generic NinjaTrader grid CSV is not yet a supported import format, so obtain the supported report or a validated conversion before importing. Direct Tradovate/partner API access for Lucid evaluation accounts requires provider confirmation and separate authorized read-only access.
+
+## Targeted replay repair
+
+Run the repair tool from `backend/` with a read-only database URL first. Dry-run is the default and prints the affected trade rows, every table row linked to those trades, canonical replacements, allocation details, and totals. Supply the full authorized account UUID, all stable execution IDs, and the last eight characters of the malformed trade UUID:
+
+```powershell
+python tools/repair_ninjatrader_replay.py `
+  --account-id <account-uuid> `
+  --preserve-trade-suffix ef02d061 `
+  --execution-id <fill-id-1> --execution-id <fill-id-2> `
+  --execution-id <fill-id-3> --execution-id <fill-id-4> `
+  --execution-id <fill-id-5> --execution-id <fill-id-6> `
+  --execution-id <fill-id-7> --execution-id <fill-id-8>
+```
+
+For fees, pass a JSON file whose `fees_by_execution` object maps those stable IDs to actual per-fill fees from the broker report and whose `source` identifies that report. Do not infer or evenly allocate trade totals. Review the preview and an independent backup before applying. An apply run requires both `--apply` and `--confirm-account-id <same-full-account-uuid>`; it locks the account, repeats validation, preserves the original trade UUID and its linked journal/capture/tag/review records, materializes only the specified executions, and rolls back on any failed check. Do not add `--apply` until the reviewed production preview is approved.

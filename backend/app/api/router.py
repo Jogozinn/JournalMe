@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar as month_calendar
+import hashlib
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
@@ -50,6 +51,7 @@ from app.schemas import (
     AccountFromPresetCreate,
     AccountUpdate,
     BrokerBridgeAccountSnapshot,
+    BrokerBridgeExecutionBatch,
     BrokerBridgeExecutionIngest,
     BrokerBridgeHeartbeat,
     BrokerBridgeSourceAccount,
@@ -1821,6 +1823,90 @@ def broker_bridge_heartbeat(
     }
 
 
+@router.post("/broker-bridge/execution-batches/start")
+def broker_bridge_execution_batch_start(
+    payload: BrokerBridgeExecutionBatch,
+    db: Db,
+    connection: BridgeConnectionAuth,
+) -> dict[str, Any]:
+    source = _bridge_source_connection(
+        db, connection, payload.source_namespace, payload.source_account_name
+    )
+    if source.account_id is None:
+        raise HTTPException(409, "Bridge source is not mapped to a JournalMe account.")
+    metadata = dict(source.metadata_json or {})
+    active = metadata.get("active_execution_batch") or {}
+    expected_ids = set(payload.expected_execution_ids)
+    if active.get("id") != str(payload.batch_id):
+        expected_ids.update(active.get("expected_execution_ids") or [])
+    metadata["active_execution_batch"] = {
+        "id": str(payload.batch_id),
+        "expected_execution_ids": sorted(expected_ids),
+        "started_at": _timestamp(datetime.now(timezone.utc)),
+    }
+    source.metadata_json = metadata
+    db.commit()
+    return {
+        "status": "buffering",
+        "connection_id": str(source.id),
+        "expected_execution_count": len(expected_ids),
+    }
+
+
+@router.post("/broker-bridge/execution-batches/complete")
+def broker_bridge_execution_batch_complete(
+    payload: BrokerBridgeExecutionBatch,
+    db: Db,
+    connection: BridgeConnectionAuth,
+) -> dict[str, Any]:
+    source = _bridge_source_connection(
+        db, connection, payload.source_namespace, payload.source_account_name
+    )
+    if source.account_id is None:
+        raise HTTPException(409, "Bridge source is not mapped to a JournalMe account.")
+    metadata = dict(source.metadata_json or {})
+    active = metadata.get("active_execution_batch") or {}
+    if active.get("id") != str(payload.batch_id):
+        raise HTTPException(409, "Execution replay batch is not the active account batch.")
+    expected_ids = set(active.get("expected_execution_ids") or [])
+    expected_ids.update(payload.expected_execution_ids)
+    found_ids = set(db.scalars(
+        select(BrokerExecutionEvent.external_execution_id).where(
+            BrokerExecutionEvent.connection_id == source.id,
+            BrokerExecutionEvent.account_id == source.account_id,
+            BrokerExecutionEvent.external_execution_id.in_(expected_ids),
+        )
+    ).all()) if expected_ids else set()
+    missing_ids = expected_ids - found_ids
+    if missing_ids:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "replay_batch_incomplete",
+                "expected_count": len(expected_ids),
+                "received_count": len(found_ids),
+                "missing_count": len(missing_ids),
+            },
+        )
+    completed_at = datetime.now(timezone.utc)
+    metadata.pop("active_execution_batch", None)
+    metadata["last_completed_execution_batch"] = {
+        "id": str(payload.batch_id),
+        "execution_count": len(expected_ids),
+        "completed_at": _timestamp(completed_at),
+    }
+    source.metadata_json = metadata
+    trades = materialize_closed_trades(db, source)
+    db.commit()
+    return {
+        "status": "complete",
+        "connection_id": str(source.id),
+        "execution_count": len(expected_ids),
+        "trade_ids": [str(trade.id) for trade in trades],
+        "completed_at": _timestamp(completed_at),
+    }
+
+
 def _bridge_source_connection(
     db: Session,
     installation: BrokerConnection,
@@ -1999,7 +2085,11 @@ def broker_bridge_execution(
         )
     )
     if existing is not None:
-        created_trades = materialize_closed_trades(db, connection, symbol=existing.symbol)
+        created_trades = (
+            materialize_closed_trades(db, connection, symbol=existing.symbol)
+            if existing.ingest_status != "needs_reconciliation"
+            else []
+        )
         db.commit()
         return {
             "id": str(existing.id),
@@ -2007,6 +2097,30 @@ def broker_bridge_execution(
             "ingest_status": existing.ingest_status,
             "trade_ids": [str(item.id) for item in created_trades],
         }
+    active_batch = (connection.metadata_json or {}).get("active_execution_batch")
+    previous_times = db.scalars(
+        select(BrokerExecutionEvent.executed_at).where(
+            BrokerExecutionEvent.connection_id == connection.id,
+            BrokerExecutionEvent.account_id == connection.account_id,
+            BrokerExecutionEvent.symbol == payload.symbol,
+        )
+    ).all()
+    latest_seen = max(
+        (_as_aware_utc(value) for value in previous_times), default=None
+    )
+    arrived_out_of_order = bool(
+        not active_batch
+        and latest_seen is not None
+        and _as_aware_utc(payload.executed_at) < latest_seen
+    )
+    source_payload = dict(payload.source_payload or {})
+    if arrived_out_of_order:
+        source_payload["ordering_warning"] = (
+            "Execution arrived after a newer timestamp; retained for review and excluded from automatic reconstruction."
+        )
+        metadata = dict(connection.metadata_json or {})
+        metadata["last_out_of_order_execution_at"] = _timestamp(datetime.now(timezone.utc))
+        connection.metadata_json = metadata
     item = BrokerExecutionEvent(
         user_id=connection.user_id,
         account_id=connection.account_id,
@@ -2022,15 +2136,38 @@ def broker_bridge_execution(
         point_value=payload.point_value,
         currency=payload.currency.upper(),
         executed_at=payload.executed_at,
-        ingest_status="received",
-        source_payload=payload.source_payload,
+        ingest_status="needs_reconciliation" if arrived_out_of_order else "received",
+        source_payload=source_payload,
     )
     connection.status = "connected"
     connection.last_seen_at = datetime.now(timezone.utc)
     connection.last_sync_at = datetime.now(timezone.utc)
     db.add(item)
     db.flush()
-    created_trades = materialize_closed_trades(db, connection, symbol=payload.symbol)
+    if arrived_out_of_order:
+        candidates = db.scalars(
+            select(Trade).where(
+                Trade.account_id == connection.account_id,
+                Trade.source_quality == "broker_live",
+                Trade.entry_timestamp <= payload.executed_at,
+                Trade.exit_timestamp >= payload.executed_at,
+            ).execution_options(include_excluded_accounting=True)
+        ).all()
+        for trade in candidates:
+            if (trade.source_payload or {}).get("connection_id") != str(connection.id):
+                continue
+            trade.reconciliation_status = "needs_reconciliation"
+            prior_warnings = list((trade.source_payload or {}).get("warnings") or [])
+            prior_warnings.append(
+                "A late execution arrived inside this trade's time range; verify its boundary against broker replay."
+            )
+            trade.source_payload = {
+                **(trade.source_payload or {}),
+                "warnings": list(dict.fromkeys(prior_warnings)),
+            }
+        created_trades = []
+    else:
+        created_trades = materialize_closed_trades(db, connection, symbol=payload.symbol)
     db.commit()
     db.refresh(item)
     return {
@@ -2226,6 +2363,153 @@ def broker_activity(
             }
             for item in events
         ],
+    }
+
+
+@router.get("/broker-reconciliation-diagnostic")
+def broker_reconciliation_diagnostic(
+    account_id: UUID,
+    db: Db,
+    user: CurrentUser,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+    limit: int = Query(default=500, ge=1, le=2000),
+) -> dict[str, Any]:
+    """Read-only, account-scoped evidence for investigating execution gaps."""
+    _account_or_404(db, user, account_id)
+    connections = list(db.scalars(
+        select(BrokerConnection).where(
+            BrokerConnection.user_id == user.id,
+            BrokerConnection.account_id == account_id,
+            BrokerConnection.provider == "ninjatrader",
+        ).order_by(BrokerConnection.created_at)
+    ).all())
+    connection_ids = [item.id for item in connections]
+    events = list(db.scalars(
+        select(BrokerExecutionEvent).where(
+            BrokerExecutionEvent.user_id == user.id,
+            BrokerExecutionEvent.account_id == account_id,
+            BrokerExecutionEvent.provider == "ninjatrader",
+            *([BrokerExecutionEvent.executed_at >= start_at] if start_at else []),
+            *([BrokerExecutionEvent.executed_at <= end_at] if end_at else []),
+        ).order_by(BrokerExecutionEvent.executed_at, BrokerExecutionEvent.created_at)
+        .limit(limit)
+    ).all())
+    trades = list(db.scalars(
+        select(Trade).where(Trade.account_id == account_id)
+        .order_by(Trade.entry_timestamp)
+    ).all())
+    trades_by_execution: dict[str, list[Trade]] = defaultdict(list)
+    for trade in trades:
+        payload = trade.source_payload or {}
+        if payload.get("connection_id") not in {str(value) for value in connection_ids}:
+            continue
+        for execution_id in payload.get("execution_ids") or []:
+            trades_by_execution[str(execution_id)].append(trade)
+
+    def redacted(value: str | None) -> str | None:
+        if not value:
+            return None
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+    installation_ids = {item.installation_id for item in connections if item.installation_id}
+    installations = {
+        item.id: item for item in db.scalars(
+            select(BrokerConnection).where(
+                BrokerConnection.user_id == user.id,
+                BrokerConnection.id.in_(installation_ids),
+            )
+        ).all()
+    } if installation_ids else {}
+    connection_reports = []
+    for item in connections:
+        installation = installations.get(item.installation_id)
+        metadata = (
+            (installation.metadata_json or {})
+            if installation
+            else (item.metadata_json or {})
+        )
+        snapshot = (item.metadata_json or {}).get("account_snapshot")
+        active_batch = metadata.get("active_execution_batch") or {}
+        connection_reports.append(
+            {
+                "connection_id": redacted(str(item.id)),
+                "installation_id": (
+                    redacted(str(item.installation_id)) if item.installation_id else None
+                ),
+                "status": item.status,
+                "source_namespace": item.source_namespace,
+                "source_account_name": item.source_account_name,
+                "authorized_account_id": str(item.account_id) if item.account_id else None,
+                "last_seen_at": _timestamp(item.last_seen_at),
+                "last_sync_at": _timestamp(item.last_sync_at),
+                "pending_uploads": metadata.get("pending_uploads"),
+                "legacy_pending_uploads": metadata.get("legacy_pending_uploads"),
+                "last_failure_code": metadata.get("last_failure_code"),
+                "last_failure_at": metadata.get("last_failure_at"),
+                "last_out_of_order_execution_at": metadata.get(
+                    "last_out_of_order_execution_at"
+                ),
+                "active_replay_batch": (
+                    {
+                        "batch_ref": redacted(str(active_batch.get("id"))),
+                        "expected_execution_count": len(
+                            active_batch.get("expected_execution_ids") or []
+                        ),
+                        "started_at": active_batch.get("started_at"),
+                    }
+                    if active_batch
+                    else None
+                ),
+                "broker_snapshot": snapshot,
+            }
+        )
+    return {
+        "account_id": str(account_id),
+        "read_only": True,
+        "coverage_assessment": (
+            "pending_uploads_or_recent_failure"
+            if any(
+                (report["pending_uploads"] or 0) > 0
+                or (report["legacy_pending_uploads"] or 0) > 0
+                or report["last_failure_code"]
+                or report["last_out_of_order_execution_at"]
+                or report["active_replay_batch"]
+                for report in connection_reports
+            )
+            else "unknown_without_broker_history_replay"
+        ),
+        "connections": connection_reports,
+        "executions": [
+            {
+                "execution_ref": redacted(item.external_execution_id),
+                "order_ref": redacted(item.external_order_id),
+                "timestamp": _timestamp(item.executed_at),
+                "symbol": item.symbol,
+                "side": item.side,
+                "quantity": _decimal(item.quantity),
+                "price": _decimal(item.price),
+                "commission": _decimal(item.commission),
+                "ingest_status": item.ingest_status,
+                "connection_id": redacted(str(item.connection_id)),
+                "mapped_trades": [
+                    {
+                        "trade_ref": redacted(str(trade.id)),
+                        "entry_timestamp": _timestamp(trade.entry_timestamp),
+                        "exit_timestamp": _timestamp(trade.exit_timestamp),
+                        "quantity": _decimal(trade.contract_quantity),
+                        "gross_pnl": _decimal(trade.gross_pnl),
+                        "fees": _decimal(trade.fees),
+                        "net_pnl": _decimal(trade.net_pnl),
+                        "reconciliation_status": trade.reconciliation_status,
+                    }
+                    for trade in trades_by_execution.get(item.external_execution_id, [])
+                ],
+            }
+            for item in events
+        ],
+        "execution_count": len(events),
+        "truncated": len(events) == limit,
     }
 
 

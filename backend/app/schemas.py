@@ -556,6 +556,13 @@ class BrokerBridgeExecutionIngest(BaseModel):
     source_payload: dict[str, object] = Field(default_factory=dict)
 
 
+class BrokerBridgeExecutionBatch(BaseModel):
+    source_namespace: str = Field(min_length=1, max_length=160)
+    source_account_name: str = Field(min_length=1, max_length=160)
+    batch_id: UUID
+    expected_execution_ids: list[str] = Field(default_factory=list, max_length=10000)
+
+
 class BrokerBridgeAccountSnapshot(BaseModel):
     source_namespace: str | None = Field(default=None, min_length=1, max_length=160)
     source_account_name: str | None = Field(default=None, min_length=1, max_length=160)

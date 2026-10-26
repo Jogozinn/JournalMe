@@ -395,7 +395,23 @@ export default function AccountDetailPage() {
       <PageHeader eyebrow={`${account.provider} · ${account.account_type}`} title={account.name} description={`All dates use ${account.timezone}. Imported and manual sources remain visibly distinct.`} action={<Link className="button" href="/accounts">All accounts</Link>} />
       {error && <ErrorState message={error} />}
       <section className="card account-balance-summary">
-        <div><p className="eyebrow">Resolved account balance</p><h2>{money(account.current_balance, account.currency)}</h2><small>{account.balance_resolution.resolution_method.replaceAll("_", " ")} · starting balance {money(account.starting_balance, account.currency)}</small></div>
+        <div>
+          <p className="eyebrow">Resolved account balance</p>
+          <h2>{money(account.current_balance, account.currency)}</h2>
+          <small>{account.balance_resolution.resolution_method.replaceAll("_", " ")} · starting balance {money(account.starting_balance, account.currency)}</small>
+          <small>Journal calculated balance: {money(account.balance_resolution.calculated_balance, account.currency)}</small>
+          {(account.balance_resolution.broker_reported_cash_value != null || account.balance_resolution.broker_reported_net_liquidation != null) && (
+            <small>
+              Broker reported {money(account.balance_resolution.broker_reported_cash_value ?? account.balance_resolution.broker_reported_net_liquidation, account.currency)}
+              {account.balance_resolution.broker_snapshot_fresh ? " · fresh" : " · stale"}
+              {account.balance_resolution.broker_snapshot_as_of ? ` · ${dateTime(account.balance_resolution.broker_snapshot_as_of)}` : ""}
+              {account.balance_resolution.broker_snapshot_source_account ? ` · ${account.balance_resolution.broker_snapshot_source_account}` : ""}
+            </small>
+          )}
+          {account.balance_resolution.broker_snapshot_fresh && Number(account.balance_resolution.reconciliation_difference) !== 0 && (
+            <small className="warning-text">Broker and journal balance difference: {money(account.balance_resolution.reconciliation_difference, account.currency)}</small>
+          )}
+        </div>
         <div className="plan-badges">{account.active_plan && <><span>{account.active_plan.plan_family}</span><span>{account.active_plan.phase}</span><span>50K</span></>}{account.configuration_required && <span className="warning-badge">Configuration required</span>}</div>
       </section>
       {account.configuration_required && <div className="notice warning"><strong>Configuration required.</strong> The historical LucidFlex version is preserved for audit, but it is inactive and does not determine this account’s badge or calculations. Choose the original LucidDaily evaluation drawdown and DLL purchase options below.</div>}
