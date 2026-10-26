@@ -4,6 +4,7 @@ COPY pyproject.toml .
 COPY app ./app
 COPY alembic.ini .
 COPY alembic ./alembic
+COPY tools/repair_ninjatrader_replay.py ./tools/repair_ninjatrader_replay.py
 RUN pip install --no-cache-dir .
 RUN mkdir -p /data/storage
 EXPOSE 8000
